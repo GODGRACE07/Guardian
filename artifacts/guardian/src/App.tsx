@@ -14,9 +14,8 @@ import NotFound from '@/pages/not-found';
 const queryClient = new QueryClient();
 
 function RootRedirect() {
-  const { session, isLoading } = useAuth();
-  if (isLoading) return null;
-  return session ? <Redirect to="/connected" /> : <Redirect to="/auth" />;
+  const { walletAddress } = useAuth();
+  return walletAddress ? <Redirect to="/connected" /> : <Redirect to="/auth" />;
 }
 
 function Router() {
@@ -24,7 +23,7 @@ function Router() {
     <Switch>
       <Route path="/" component={RootRedirect} />
       <Route path="/auth" component={AuthPage} />
-      
+
       <Route path="/connect-okx">
         {() => (
           <ProtectedRoute>
@@ -32,7 +31,7 @@ function Router() {
           </ProtectedRoute>
         )}
       </Route>
-      
+
       <Route path="/connected">
         {() => (
           <ProtectedRoute>
@@ -40,14 +39,13 @@ function Router() {
           </ProtectedRoute>
         )}
       </Route>
-      
+
       <Route component={NotFound} />
     </Switch>
   );
 }
 
 function App() {
-  // Enforce dark mode as requested
   useEffect(() => {
     document.documentElement.classList.add('dark');
   }, []);

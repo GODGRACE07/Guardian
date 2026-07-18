@@ -1,0 +1,27 @@
+kind = "web"
+previewPath = "/"
+title = "Guardian"
+version = "1.0.0"
+id = "artifacts/guardian"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23437
+
+[services.development]
+run = "pnpm --filter @workspace/guardian run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/guardian", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/guardian/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23437"
+BASE_PATH = "/"

@@ -1,11 +1,21 @@
 /**
  * OKX REST API client — browser-side, signed with Web Crypto (HMAC-SHA256).
  *
- * OKX signing spec:
- *   prehash  = timestamp + method.toUpperCase() + requestPath (+ body if POST)
+ * Signing spec (https://www.okx.com/docs-v5/en/#overview-rest-authentication):
+ *   prehash  = timestamp + method.toUpperCase() + requestPath + body
  *   sign     = base64( HMAC-SHA256( apiSecret, prehash ) )
- *   headers  = OK-ACCESS-KEY, OK-ACCESS-SIGN, OK-ACCESS-TIMESTAMP,
- *              OK-ACCESS-PASSPHRASE [, x-simulated-trading: 1]
+ *
+ *   For GET requests body must be the empty string "".
+ *   For POST requests body must be the exact JSON string sent.
+ *
+ * Required headers on every authenticated request:
+ *   OK-ACCESS-KEY        — the API key
+ *   OK-ACCESS-SIGN       — base64-encoded HMAC-SHA256 signature
+ *   OK-ACCESS-TIMESTAMP  — same ISO-8601 timestamp used in the prehash
+ *   OK-ACCESS-PASSPHRASE — the API passphrase (not the account password)
+ *
+ * Additional header for demo / simulated trading:
+ *   x-simulated-trading: 1
  */
 
 const OKX_BASE = 'https://www.okx.com';
@@ -20,9 +30,9 @@ export interface OkxConnection {
 }
 
 export interface AssetBalance {
-  ccy: string;       // e.g. "BTC"
-  bal: string;       // total balance (string from OKX)
-  eqUsd: string;     // USD equivalent
+  ccy: string;    // e.g. "BTC"
+  bal: string;    // total balance as string
+  eqUsd: string;  // USD equivalent as string
 }
 
 export interface PortfolioData {
@@ -35,10 +45,11 @@ export interface PortfolioData {
   }>;
 }
 
-// ─── HMAC-SHA256 via Web Crypto ───────────────────────────────────────────────
+// ─── HMAC-SHA256 via Web Crypto API ──────────────────────────────────────────
 
-async function hmacBase64(secret: string, message: string): Promise<string> {
+async function hmacSHA256Base64(secret: string, message: string): Promise<string> {
   const enc = new TextEncoder();
+
   const key = await crypto.subtle.importKey(
     'raw',
     enc.encode(secret),
@@ -46,67 +57,109 @@ async function hmacBase64(secret: string, message: string): Promise<string> {
     false,
     ['sign'],
   );
-  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(message));
-  // btoa from Uint8Array
-  return btoa(String.fromCharCode(...new Uint8Array(sig)));
+
+  const sigBuffer = await crypto.subtle.sign('HMAC', key, enc.encode(message));
+
+  // Convert ArrayBuffer → base64 safely (no spread to avoid stack limit on large buffers)
+  const bytes = new Uint8Array(sigBuffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
 }
 
-// ─── Signed fetch ─────────────────────────────────────────────────────────────
+// ─── Build the ISO-8601 timestamp OKX expects ────────────────────────────────
+//
+// OKX requires: YYYY-MM-DDTHH:mm:ss.sssZ  (millisecond precision, UTC)
+// JavaScript's Date.toISOString() produces exactly this format.
+// Generate a fresh timestamp per request to avoid the 30-second expiry window.
+
+function nowIso(): string {
+  return new Date().toISOString(); // e.g. "2024-07-18T09:44:23.142Z"
+}
+
+// ─── Authenticated GET ────────────────────────────────────────────────────────
 
 async function okxGet(
   conn: OkxConnection,
   path: string,
   params?: Record<string, string>,
 ): Promise<unknown> {
+  // Build the full request path (with query string if any).
+  // This exact string goes into both the URL and the prehash.
   const qs = params ? '?' + new URLSearchParams(params).toString() : '';
   const requestPath = path + qs;
-  const timestamp = new Date().toISOString(); // e.g. "2024-01-01T00:00:00.000Z"
-  const prehash = timestamp + 'GET' + requestPath;
-  const sign = await hmacBase64(conn.api_secret, prehash);
 
+  // For GET requests the body component of the prehash is always the empty string.
+  const body = '';
+  const timestamp = nowIso();
+  const prehash = timestamp + 'GET' + requestPath + body;
+  const sign = await hmacSHA256Base64(conn.api_secret, prehash);
+
+  // Build headers — do NOT include Content-Type on GET (no body is sent).
   const headers: Record<string, string> = {
-    'OK-ACCESS-KEY': conn.api_key,
-    'OK-ACCESS-SIGN': sign,
+    'OK-ACCESS-KEY':       conn.api_key,
+    'OK-ACCESS-SIGN':      sign,
     'OK-ACCESS-TIMESTAMP': timestamp,
     'OK-ACCESS-PASSPHRASE': conn.api_passphrase,
-    'Content-Type': 'application/json',
   };
-  if (conn.is_demo) headers['x-simulated-trading'] = '1';
 
-  const res = await fetch(OKX_BASE + requestPath, { headers });
-  if (!res.ok) throw new Error(`OKX HTTP ${res.status}`);
-  const json = await res.json() as { code: string; msg?: string; data: unknown };
-  if (json.code !== '0') throw new Error(json.msg ?? `OKX error code ${json.code}`);
+  // Required for OKX demo / simulated-trading accounts.
+  if (conn.is_demo) {
+    headers['x-simulated-trading'] = '1';
+  }
+
+  const res = await fetch(OKX_BASE + requestPath, { method: 'GET', headers });
+
+  // Always try to parse the body — OKX returns JSON even on auth errors,
+  // containing a useful error code and message (e.g. code "50113" = bad signature).
+  let json: { code: string; msg?: string; data?: unknown } | null = null;
+  try {
+    json = await res.json();
+  } catch {
+    // Non-JSON body (shouldn't happen with OKX but handle defensively)
+    throw new Error(`OKX HTTP ${res.status}: non-JSON response`);
+  }
+
+  // OKX uses code "0" for success. Any other code is an error, regardless
+  // of HTTP status.
+  if (!res.ok || json?.code !== '0') {
+    const code = json?.code ?? String(res.status);
+    const msg  = json?.msg  ?? `HTTP ${res.status}`;
+    throw new Error(`OKX [${code}]: ${msg}`);
+  }
+
   return json.data;
 }
 
-// ─── Public helpers ───────────────────────────────────────────────────────────
+// ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Fetches the account balance and returns a parsed PortfolioData object.
- * Only includes assets with a non-zero USD equivalent.
+ * Fetches the account balance from OKX and returns a parsed PortfolioData.
+ * Assets with a USD equivalent < $0.001 are excluded as dust.
+ * Results are sorted largest-first by USD value.
  */
 export async function fetchPortfolio(conn: OkxConnection): Promise<PortfolioData> {
-  // /api/v5/account/balance returns array; first element is the account
   const data = (await okxGet(conn, '/api/v5/account/balance')) as Array<{
     totalEq: string;
     details: AssetBalance[];
   }>;
 
   const account = data[0];
-  if (!account) throw new Error('No account data returned.');
+  if (!account) throw new Error('No account data returned by OKX.');
 
   const totalUsd = parseFloat(account.totalEq) || 0;
 
   const assets = (account.details ?? [])
     .map((d) => ({
-      symbol:  d.ccy,
-      balance: parseFloat(d.bal)    || 0,
+      symbol:   d.ccy,
+      balance:  parseFloat(d.bal)   || 0,
       usdValue: parseFloat(d.eqUsd) || 0,
       pct: totalUsd > 0 ? (parseFloat(d.eqUsd) / totalUsd) * 100 : 0,
     }))
-    .filter((a) => a.usdValue > 0.001)                  // skip dust
-    .sort((a, b) => b.usdValue - a.usdValue);            // largest first
+    .filter((a) => a.usdValue > 0.001)
+    .sort((a, b) => b.usdValue - a.usdValue);
 
   return { totalUsd, assets };
 }

@@ -354,14 +354,17 @@ export default function DashboardPage() {
   }, [userId, loadPortfolio]);
 
   // ── Load active rule count ─────────────────────────────────────────────────
+  // Note: { count: 'exact', head: true } makes a HEAD request whose Content-Range
+  // header returns null when there is no Supabase Auth session (our wallet auth
+  // bypasses Supabase Auth). Fetching the actual IDs and counting them is reliable.
   const loadRuleCount = useCallback(async () => {
     if (!userId) return;
-    const { count } = await supabase
+    const { data } = await supabase
       .from('rules')
-      .select('id', { count: 'exact', head: true })
+      .select('id')
       .eq('user_id', userId)
       .eq('active', true);
-    setActiveRuleCount(count ?? 0);
+    setActiveRuleCount(data?.length ?? 0);
   }, [userId]);
 
   // ── Load activity log ──────────────────────────────────────────────────────

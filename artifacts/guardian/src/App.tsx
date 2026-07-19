@@ -9,6 +9,7 @@ import { ProtectedRoute } from '@/components/ProtectedRoute';
 import AuthPage from '@/pages/AuthPage';
 import ConnectOkxPage from '@/pages/ConnectOkxPage';
 import ConnectedPage from '@/pages/ConnectedPage';
+import RulesPage from '@/pages/RulesPage';
 import NotFound from '@/pages/not-found';
 
 const queryClient = new QueryClient();
@@ -36,6 +37,14 @@ function Router() {
         {() => (
           <ProtectedRoute>
             <ConnectedPage />
+          </ProtectedRoute>
+        )}
+      </Route>
+
+      <Route path="/rules">
+        {() => (
+          <ProtectedRoute>
+            <RulesPage />
           </ProtectedRoute>
         )}
       </Route>

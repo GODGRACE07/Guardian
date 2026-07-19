@@ -1,4 +1,4 @@
-import { useLocation } from 'wouter';
+import { useLocation, Link } from 'wouter';
 import { ShieldCheck } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
@@ -30,17 +30,15 @@ export default function ConnectedPage() {
         </div>
 
         <Card className="border-card-border bg-card">
-          <CardContent className="pt-6 space-y-4 flex flex-col items-center">
-            <Button
-              disabled
-              className="w-full h-11 bg-primary text-primary-foreground opacity-50 cursor-not-allowed"
-              data-testid="btn-setup-rules"
-            >
-              Set Up Protection Rules →
-            </Button>
-            <p className="text-xs text-muted-foreground font-medium" data-testid="text-coming-soon">
-              Coming in the next step.
-            </p>
+          <CardContent className="pt-6 flex flex-col items-center">
+            <Link href="/rules" className="w-full">
+              <Button
+                className="w-full h-11 bg-primary hover:bg-primary/90 text-primary-foreground"
+                data-testid="btn-setup-rules"
+              >
+                Set Up Protection Rules →
+              </Button>
+            </Link>
           </CardContent>
         </Card>
 

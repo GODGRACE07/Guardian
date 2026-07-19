@@ -29,6 +29,8 @@ export default function ConnectOkxPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [showSecret, setShowSecret] = useState(false);
   const [showPassphrase, setShowPassphrase] = useState(false);
+  // Inline error state — shown directly on the form so errors are NEVER silent
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const form = useForm<ConnectionValues>({
     resolver: zodResolver(okxConnectionSchema),
@@ -43,29 +45,64 @@ export default function ConnectOkxPage() {
   const isDemoMode = form.watch('is_demo');
 
   const onSubmit = async (data: ConnectionValues) => {
-    if (!userId) return;
+    if (!userId) {
+      // Should never happen on a protected route, but surface it if it does
+      setSubmitError('Session error — please sign out and reconnect your wallet.');
+      return;
+    }
 
     setIsLoading(true);
+    setSubmitError(null);
+
     try {
-      const { error } = await supabase.from('okx_connections').insert({
-        user_id: userId,
-        api_key: data.api_key,
-        api_secret: data.api_secret,
+      // ── Step 1: deactivate any existing active connections for this user ──
+      // This MUST happen before the insert.  If we skip this and the user
+      // already has an active row, maybeSingle() on the dashboard will find
+      // two rows and return null, making the dashboard think there's no
+      // connection and silently bouncing the user back here.
+      console.debug('[ConnectOKX] deactivating existing active connections for user', userId);
+      const { error: deactivateError } = await supabase
+        .from('okx_connections')
+        .update({ active: false })
+        .eq('user_id', userId)
+        .eq('active', true);
+
+      if (deactivateError) {
+        console.error('[ConnectOKX] deactivate error:', deactivateError);
+        // Non-fatal: old row may simply not exist. Log and continue.
+      }
+
+      // ── Step 2: insert the new connection ──────────────────────────────────
+      console.debug('[ConnectOKX] inserting new connection, is_demo=', data.is_demo);
+      const { error: insertError } = await supabase.from('okx_connections').insert({
+        user_id:        userId,
+        api_key:        data.api_key,
+        api_secret:     data.api_secret,
         api_passphrase: data.api_passphrase,
-        is_demo: data.is_demo,
-        connected_at: new Date().toISOString(),
-        active: true,
+        is_demo:        data.is_demo,
+        connected_at:   new Date().toISOString(),
+        active:         true,
       });
 
-      if (error) throw error;
+      if (insertError) {
+        console.error('[ConnectOKX] insert error:', insertError);
+        throw insertError;
+      }
 
+      // ── Step 3: navigate to dashboard ─────────────────────────────────────
+      console.debug('[ConnectOKX] connection saved — navigating to /dashboard');
       setLocation('/dashboard');
-    } catch (error: unknown) {
-      const err = error as { message?: string };
+
+    } catch (err: unknown) {
+      const msg = (err as { message?: string }).message;
+      const display = msg ?? 'Something went wrong connecting your account. Please try again.';
+      console.error('[ConnectOKX] submit failed:', err);
+      // Show error BOTH inline (always visible) and as a toast (dismiss-able)
+      setSubmitError(display);
       toast({
         variant: 'destructive',
         title: 'Connection failed',
-        description: err.message ?? 'Something went wrong. Please try again.',
+        description: display,
       });
     } finally {
       setIsLoading(false);
@@ -97,6 +134,14 @@ export default function ConnectOkxPage() {
           <CardContent className="pt-6">
             <Form {...form}>
               <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-5">
+
+                {/* Inline error — always visible, never dismissed automatically */}
+                {submitError && (
+                  <div className="flex gap-2 items-start rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2.5">
+                    <AlertTriangle className="w-4 h-4 text-destructive shrink-0 mt-0.5" />
+                    <p className="text-xs text-destructive leading-relaxed">{submitError}</p>
+                  </div>
+                )}
 
                 {/* Trading Mode Toggle */}
                 <FormField

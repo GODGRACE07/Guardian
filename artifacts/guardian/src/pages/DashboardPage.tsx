@@ -389,13 +389,27 @@ export default function DashboardPage() {
 
   const initPortfolio = useCallback(async () => {
     if (!userId) return;
-    const { data: conn } = await supabase
+    const { data: conn, error: connError } = await supabase
       .from('okx_connections')
       // Fetch id alongside credentials so we can deactivate the row later
       .select('id, api_key, api_secret, api_passphrase, is_demo')
       .eq('user_id', userId)
       .eq('active', true)
       .maybeSingle();
+
+    if (connError) {
+      // PGRST116 means multiple rows matched — this happens when a previous
+      // connect attempt left behind a duplicate active row. Treat it as an
+      // error with a clear message rather than silently showing "no connection".
+      console.error('[Dashboard] initPortfolio maybeSingle error:', connError);
+      setPortfolioState({
+        status: 'error',
+        message: connError.code === 'PGRST116'
+          ? 'Multiple active connections found — please reconnect your OKX account.'
+          : connError.message,
+      });
+      return;
+    }
 
     if (!conn) {
       setPortfolioState({ status: 'no-connection' });

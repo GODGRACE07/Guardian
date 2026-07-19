@@ -99,16 +99,34 @@ async function okxGet(
 
   // Build headers — do NOT include Content-Type on GET (no body is sent).
   const headers: Record<string, string> = {
-    'OK-ACCESS-KEY':       conn.api_key,
-    'OK-ACCESS-SIGN':      sign,
-    'OK-ACCESS-TIMESTAMP': timestamp,
+    'OK-ACCESS-KEY':        conn.api_key,
+    'OK-ACCESS-SIGN':       sign,
+    'OK-ACCESS-TIMESTAMP':  timestamp,
     'OK-ACCESS-PASSPHRASE': conn.api_passphrase,
   };
 
-  // Required for OKX demo / simulated-trading accounts.
-  if (conn.is_demo) {
+  // ── Demo / simulated-trading header ──────────────────────────────────────
+  // OKX maintains completely separate environments for live and demo trading.
+  // A demo API key sent to the live environment (or vice-versa) returns error
+  // 50101 "APIKey does not match current environment."
+  // The ONLY way to target the demo environment is to include this header with
+  // value "1" on every authenticated request.  Omit it entirely for live
+  // trading — setting it to "0" does NOT equal omitting it.
+  // Coerce to boolean explicitly because Supabase may return the column value
+  // as a string ("true"/"false") depending on the query path.
+  if (Boolean(conn.is_demo)) {
     headers['x-simulated-trading'] = '1';
   }
+
+  // DEV: log the full outgoing header set so we can confirm x-simulated-trading
+  // is present when is_demo is true and absent when is_demo is false.
+  console.debug('[okx] outgoing headers for', requestPath, {
+    'OK-ACCESS-KEY':       conn.api_key.slice(0, 8) + '…',
+    'OK-ACCESS-TIMESTAMP': timestamp,
+    'x-simulated-trading': headers['x-simulated-trading'] ?? '(omitted)',
+    is_demo_raw:           conn.is_demo,
+    is_demo_coerced:       Boolean(conn.is_demo),
+  });
 
   const res = await fetch(OKX_BASE + requestPath, { method: 'GET', headers });
 

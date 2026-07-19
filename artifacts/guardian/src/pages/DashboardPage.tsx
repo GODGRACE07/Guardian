@@ -61,7 +61,15 @@ function fmtBal(n: number): string {
 
 // ─── Sub-sections ─────────────────────────────────────────────────────────────
 
-function PortfolioSection({ state, onRetry }: { state: PortfolioState; onRetry: () => void }) {
+function PortfolioSection({
+  state,
+  onRetry,
+  onSwitchAccount,
+}: {
+  state: PortfolioState;
+  onRetry: () => void;
+  onSwitchAccount: () => void;
+}) {
   if (state.status === 'loading') {
     return (
       <div className="rounded-2xl border border-card-border bg-card p-6 flex items-center justify-center gap-2 text-muted-foreground">
@@ -132,16 +140,24 @@ function PortfolioSection({ state, onRetry }: { state: PortfolioState; onRetry: 
               {fmtUsd(data.totalUsd)}
             </p>
           </div>
-          <span
-            className={[
-              'text-[10px] font-semibold px-2 py-1 rounded-full border mt-1',
-              isDemo
-                ? 'bg-primary/10 text-primary border-primary/20'
-                : 'bg-amber-500/10 text-amber-400 border-amber-500/20',
-            ].join(' ')}
-          >
-            {isDemo ? 'Demo Trading' : 'Live Trading'}
-          </span>
+          <div className="flex flex-col items-end gap-1.5 mt-1">
+            <span
+              className={[
+                'text-[10px] font-semibold px-2 py-1 rounded-full border',
+                isDemo
+                  ? 'bg-primary/10 text-primary border-primary/20'
+                  : 'bg-amber-500/10 text-amber-400 border-amber-500/20',
+              ].join(' ')}
+            >
+              {isDemo ? 'Demo Trading' : 'Live Trading'}
+            </span>
+            <button
+              onClick={onSwitchAccount}
+              className="text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-colors underline-offset-2 hover:underline"
+            >
+              Switch account
+            </button>
+          </div>
         </div>
       </div>
 
@@ -329,7 +345,35 @@ export default function DashboardPage() {
   const [logLoading, setLogLoading] = useState(true);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
 
+  // Signing credentials for live OKX requests
   const connRef = useRef<OkxConnection | null>(null);
+  // Supabase row id — stored separately so we can deactivate the row on disconnect
+  const connIdRef = useRef<string | null>(null);
+
+  // ── Disconnect confirmation state ──────────────────────────────────────────
+  const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
+  const [isDisconnecting, setIsDisconnecting] = useState(false);
+
+  const handleDisconnect = async () => {
+    if (!connIdRef.current) return;
+    setIsDisconnecting(true);
+    const { error } = await supabase
+      .from('okx_connections')
+      .update({ active: false })
+      // Match by id so we never accidentally deactivate a connection belonging
+      // to a different user or a row that was already replaced.
+      .eq('id', connIdRef.current);
+
+    if (error) {
+      toast({ variant: 'destructive', title: 'Disconnect failed', description: error.message });
+      setIsDisconnecting(false);
+      setShowDisconnectConfirm(false);
+      return;
+    }
+
+    // Session stays active — only the OKX link is removed.
+    setLocation('/connect-okx');
+  };
 
   // ── Load OKX connection + portfolio ────────────────────────────────────────
   const loadPortfolio = useCallback(async (conn: OkxConnection) => {
@@ -347,7 +391,8 @@ export default function DashboardPage() {
     if (!userId) return;
     const { data: conn } = await supabase
       .from('okx_connections')
-      .select('api_key, api_secret, api_passphrase, is_demo')
+      // Fetch id alongside credentials so we can deactivate the row later
+      .select('id, api_key, api_secret, api_passphrase, is_demo')
       .eq('user_id', userId)
       .eq('active', true)
       .maybeSingle();
@@ -356,8 +401,15 @@ export default function DashboardPage() {
       setPortfolioState({ status: 'no-connection' });
       return;
     }
-    connRef.current = conn as OkxConnection;
-    await loadPortfolio(conn as OkxConnection);
+    connIdRef.current = conn.id as string;
+    const creds: OkxConnection = {
+      api_key:        conn.api_key as string,
+      api_secret:     conn.api_secret as string,
+      api_passphrase: conn.api_passphrase as string,
+      is_demo:        conn.is_demo as boolean,
+    };
+    connRef.current = creds;
+    await loadPortfolio(creds);
   }, [userId, loadPortfolio]);
 
   // ── Load active rule count ─────────────────────────────────────────────────
@@ -454,7 +506,41 @@ export default function DashboardPage() {
         <PortfolioSection
           state={portfolioState}
           onRetry={() => connRef.current && loadPortfolio(connRef.current)}
+          onSwitchAccount={() => setShowDisconnectConfirm(true)}
         />
+
+        {/* ── Disconnect confirmation card ────────────────────────────────── */}
+        {showDisconnectConfirm && (
+          <div className="rounded-2xl border border-[#f59e0b]/30 bg-[#451a03]/60 p-5 space-y-4">
+            <div className="space-y-1">
+              <p className="text-sm font-semibold text-[#f59e0b]">Disconnect OKX account?</p>
+              <p className="text-xs text-[#f59e0b]/75 leading-relaxed">
+                This will disconnect your current OKX connection. Guardian will stop monitoring
+                your portfolio until you reconnect. You can reconnect anytime.
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setShowDisconnectConfirm(false)}
+                disabled={isDisconnecting}
+                className="flex-1 border-[#f59e0b]/30 text-[#f59e0b]/80 hover:text-[#f59e0b] hover:bg-[#f59e0b]/5 text-xs"
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleDisconnect}
+                disabled={isDisconnecting}
+                className="flex-1 bg-[#f59e0b] hover:bg-[#f59e0b]/90 text-black font-semibold text-xs gap-1.5"
+              >
+                {isDisconnecting && <Loader2 className="w-3 h-3 animate-spin" />}
+                {isDisconnecting ? 'Disconnecting…' : 'Disconnect'}
+              </Button>
+            </div>
+          </div>
+        )}
 
         {/* Active protection summary */}
         <ActiveRulesRow count={activeRuleCount} />

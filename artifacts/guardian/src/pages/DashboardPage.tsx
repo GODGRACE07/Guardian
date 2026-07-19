@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Link } from 'wouter';
+import { Link, useLocation } from 'wouter';
 import {
   ShieldCheck,
   Loader2,
@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   ChevronRight,
   Zap,
+  LogOut,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
@@ -313,8 +314,14 @@ function ActivityLog({
 const REFRESH_INTERVAL_MS = 30_000;
 
 export default function DashboardPage() {
-  const { userId } = useAuth();
+  const { userId, clearWalletSession } = useAuth();
+  const [, setLocation] = useLocation();
   const { toast } = useToast();
+
+  const handleSignOut = () => {
+    clearWalletSession(); // removes guardian_wallet_session from localStorage
+    setLocation('/auth');
+  };
 
   const [portfolioState, setPortfolioState] = useState<PortfolioState>({ status: 'loading' });
   const [activeRuleCount, setActiveRuleCount] = useState<number | null>(null);
@@ -427,11 +434,20 @@ export default function DashboardPage() {
       <div className="w-full max-w-[420px] mx-auto px-4 pt-10 pb-2 space-y-5">
 
         {/* Header */}
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight text-foreground">Dashboard</h1>
-          <p className="text-sm text-muted-foreground">
-            Your OKX portfolio, live.
-          </p>
+        <div className="flex items-start justify-between gap-2">
+          <div className="space-y-1">
+            <h1 className="text-2xl font-semibold tracking-tight text-foreground">Dashboard</h1>
+            <p className="text-sm text-muted-foreground">
+              Your OKX portfolio, live.
+            </p>
+          </div>
+          <button
+            onClick={handleSignOut}
+            aria-label="Sign out"
+            className="mt-1 p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors shrink-0"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
         </div>
 
         {/* Portfolio snapshot */}

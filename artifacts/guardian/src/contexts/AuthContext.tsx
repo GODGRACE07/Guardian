@@ -1,6 +1,8 @@
 import React, { createContext, useContext, useState, useCallback } from 'react';
 
-// Persisted within the browser tab session (cleared on tab close)
+// Persisted in localStorage so the session survives page refreshes, tab
+// closes, and browser restarts.  The user is only logged out when they
+// explicitly tap "Sign Out", which calls clearWalletSession().
 const SESSION_KEY = 'guardian_wallet_session';
 
 interface WalletSession {
@@ -25,11 +27,11 @@ const AuthContext = createContext<AuthContextType>({
 });
 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
-  // Initialise from sessionStorage so the user stays logged in on refresh
-  // within the same tab session without re-connecting MetaMask every time.
+  // Read from localStorage on first render so any existing session is
+  // immediately available — no wallet reconnect required after a page reload.
   const [session, setSession] = useState<WalletSession | null>(() => {
     try {
-      const raw = sessionStorage.getItem(SESSION_KEY);
+      const raw = localStorage.getItem(SESSION_KEY);
       return raw ? (JSON.parse(raw) as WalletSession) : null;
     } catch {
       return null;
@@ -38,12 +40,12 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   const setWalletSession = useCallback((address: string, userId: string) => {
     const s: WalletSession = { walletAddress: address, userId };
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify(s));
+    localStorage.setItem(SESSION_KEY, JSON.stringify(s));
     setSession(s);
   }, []);
 
   const clearWalletSession = useCallback(() => {
-    sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
     setSession(null);
   }, []);
 

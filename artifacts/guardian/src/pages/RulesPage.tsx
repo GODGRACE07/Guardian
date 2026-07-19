@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useLocation } from 'wouter';
 import {
   ShieldCheck,
   Plus,
@@ -10,6 +11,7 @@ import {
   Shuffle,
   ToggleLeft,
   ToggleRight,
+  LogOut,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
@@ -177,7 +179,7 @@ function RuleCard({
 
 export default function RulesPage() {
   const [, setLocation] = useLocation();
-  const { userId } = useAuth();
+  const { userId, clearWalletSession } = useAuth();
   const { toast } = useToast();
 
   // ── Data state ──────────────────────────────────────────────────────────────
@@ -292,6 +294,12 @@ export default function RulesPage() {
     setSaving(false);
   };
 
+  // ── Sign out ────────────────────────────────────────────────────────────────
+  const handleSignOut = () => {
+    clearWalletSession(); // removes guardian_wallet_session from localStorage
+    setLocation('/auth');
+  };
+
   // ── Derived ─────────────────────────────────────────────────────────────────
   const meta = selectedType ? RULE_META[selectedType] : null;
 
@@ -301,13 +309,22 @@ export default function RulesPage() {
       <div className="w-full max-w-[420px] mx-auto px-4 py-10 space-y-6">
 
         {/* Header */}
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight text-foreground">
-            Protection Rules
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            Guardian checks these every minute and acts automatically.
-          </p>
+        <div className="flex items-start justify-between gap-2">
+          <div className="space-y-1">
+            <h1 className="text-2xl font-semibold tracking-tight text-foreground">
+              Protection Rules
+            </h1>
+            <p className="text-sm text-muted-foreground">
+              Guardian checks these every minute and acts automatically.
+            </p>
+          </div>
+          <button
+            onClick={handleSignOut}
+            aria-label="Sign out"
+            className="mt-1 p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors shrink-0"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
         </div>
 
         {/* ── Rules list ─────────────────────────────────────────────────────── */}

@@ -10,13 +10,14 @@ import AuthPage from '@/pages/AuthPage';
 import ConnectOkxPage from '@/pages/ConnectOkxPage';
 import ConnectedPage from '@/pages/ConnectedPage';
 import RulesPage from '@/pages/RulesPage';
+import DashboardPage from '@/pages/DashboardPage';
 import NotFound from '@/pages/not-found';
 
 const queryClient = new QueryClient();
 
 function RootRedirect() {
   const { walletAddress } = useAuth();
-  return walletAddress ? <Redirect to="/connected" /> : <Redirect to="/auth" />;
+  return walletAddress ? <Redirect to="/dashboard" /> : <Redirect to="/auth" />;
 }
 
 function Router() {
@@ -45,6 +46,14 @@ function Router() {
         {() => (
           <ProtectedRoute>
             <RulesPage />
+          </ProtectedRoute>
+        )}
+      </Route>
+
+      <Route path="/dashboard">
+        {() => (
+          <ProtectedRoute>
+            <DashboardPage />
           </ProtectedRoute>
         )}
       </Route>

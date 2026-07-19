@@ -59,7 +59,7 @@ export default function ConnectOkxPage() {
 
       if (error) throw error;
 
-      setLocation('/connected');
+      setLocation('/dashboard');
     } catch (error: unknown) {
       const err = error as { message?: string };
       toast({

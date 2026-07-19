@@ -90,7 +90,7 @@ export default function AuthPage() {
         .eq('active', true)
         .maybeSingle();
 
-      setLocation(connection ? '/connected' : '/connect-okx');
+      setLocation(connection ? '/dashboard' : '/connect-okx');
     } catch (error: unknown) {
       const err = error as { code?: number; message?: string };
       const isRejection = err.code === 4001;

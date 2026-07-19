@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useLocation } from 'wouter';
 import {
   ShieldCheck,
   Plus,
@@ -16,6 +15,7 @@ import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
+import { BottomNav } from '@/components/BottomNav';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -302,18 +302,6 @@ export default function RulesPage() {
 
         {/* Header */}
         <div className="space-y-1">
-          <div className="flex items-center gap-2 mb-4">
-            <button
-              onClick={() => setLocation('/connected')}
-              className="text-muted-foreground hover:text-foreground transition-colors"
-              aria-label="Back"
-            >
-              <ChevronLeft className="w-5 h-5" />
-            </button>
-            <div className="h-7 w-7 rounded-lg bg-primary/10 flex items-center justify-center">
-              <ShieldCheck className="w-4 h-4 text-primary" />
-            </div>
-          </div>
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">
             Protection Rules
           </h1>
@@ -498,6 +486,8 @@ export default function RulesPage() {
           </div>
         )}
       </div>
+
+      <BottomNav />
     </div>
   );
 }

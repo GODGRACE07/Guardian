@@ -140,7 +140,20 @@ function evaluateRule(
     // ── Price-target mode ────────────────────────────────────────────────────
     // No baseline needed — fire immediately when price ≤ target_price.
     if (rule.target_price != null && rule.target_price > 0) {
-      if (currentPrice <= rule.target_price) {
+      const willTrigger = currentPrice <= rule.target_price;
+      logger.info(
+        {
+          ruleId:       rule.id,
+          asset:        rule.asset,
+          targetPrice:  rule.target_price,
+          currentPrice: currentPrice,
+          balance:      asset.balance,
+          usdValue:     asset.usdValue,
+          willTrigger,
+        },
+        `[worker] stop_loss target_price check — current ${currentPrice.toFixed(4)} ${willTrigger ? '<=' : '>'} target ${rule.target_price.toFixed(4)} → ${willTrigger ? 'TRIGGER' : 'no trigger'}`,
+      );
+      if (willTrigger) {
         return {
           triggered: true,
           reason: `Stop-loss triggered: ${rule.asset} price ${currentPrice.toFixed(4)} reached target ${rule.target_price.toFixed(4)}`,

@@ -122,7 +122,10 @@ export async function okxPost(
 export async function fetchPortfolio(conn: OkxConnection): Promise<PortfolioData> {
   const data = await okxGet(conn, '/api/v5/account/balance') as Array<{
     totalEq: string;
-    details: Array<{ ccy: string; bal: string; eqUsd: string }>;
+    // OKX detail items have no `bal` field — the actual cash balance field is
+    // `cashBal`. Using `bal` always yields undefined → 0, which makes every
+    // asset appear to have no balance and breaks stop-loss evaluation.
+    details: Array<{ ccy: string; cashBal: string; eqUsd: string }>;
   }>;
 
   const account = data[0];
@@ -133,11 +136,11 @@ export async function fetchPortfolio(conn: OkxConnection): Promise<PortfolioData
   const assets = (account.details ?? [])
     .map((d) => ({
       symbol:   d.ccy,
-      balance:  parseFloat(d.bal)   || 0,
-      usdValue: parseFloat(d.eqUsd) || 0,
+      balance:  parseFloat(d.cashBal) || 0,   // was d.bal — field does not exist in OKX response
+      usdValue: parseFloat(d.eqUsd)   || 0,
       pct: totalUsd > 0 ? (parseFloat(d.eqUsd) / totalUsd) * 100 : 0,
     }))
-    .filter((a) => a.usdValue > 0.001)
+    .filter((a) => a.balance > 0)             // filter on actual balance, not just USD value
     .sort((a, b) => b.usdValue - a.usdValue);
 
   return { totalUsd, assets };

@@ -1,5 +1,6 @@
 import app from "./app";
 import { logger } from "./lib/logger";
+import { startWorker } from "./worker/index.js";
 
 const rawPort = process.env["PORT"];
 
@@ -22,4 +23,9 @@ app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
+
+  // Start the Guardian background worker after the HTTP server is up.
+  // The worker fires its first cycle 10 seconds after boot to avoid
+  // hammering OKX during restarts.
+  startWorker();
 });

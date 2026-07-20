@@ -22,12 +22,14 @@ import { BottomNav } from '@/components/BottomNav';
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type RuleType = 'stop_loss' | 'concentration_alert' | 'rebalance_alert';
+type StopLossMode = 'pct' | 'price';
 
 interface Rule {
   id: string;
   rule_type: RuleType;
   asset: string;
-  threshold_pct: number;
+  threshold_pct: number | null;
+  target_price: number | null;
   active: boolean;
 }
 
@@ -99,6 +101,19 @@ const RULE_TYPE_ORDER: RuleType[] = [
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
+/** Human-readable description of a rule, handling both stop-loss modes. */
+function ruleDescription(rule: Rule): string {
+  if (rule.rule_type === 'stop_loss') {
+    if (rule.target_price != null && rule.target_price > 0) {
+      return `Sell ${rule.asset} if price drops to ${rule.target_price.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 6 })}`;
+    }
+    const pct = rule.threshold_pct ?? 0;
+    return RULE_META.stop_loss.plain(rule.asset, pct);
+  }
+  const pct = rule.threshold_pct ?? 0;
+  return RULE_META[rule.rule_type].plain(rule.asset, pct);
+}
+
 function RuleCard({
   rule,
   onToggle,
@@ -138,10 +153,13 @@ function RuleCard({
             rule.active ? 'text-foreground' : 'text-muted-foreground',
           ].join(' ')}
         >
-          {meta.plain(rule.asset, rule.threshold_pct)}
+          {ruleDescription(rule)}
         </p>
         <p className="text-xs text-muted-foreground/70 mt-0.5">
           {meta.label}
+          {rule.rule_type === 'stop_loss' && rule.target_price != null && (
+            <span className="ml-1 text-primary/60">· price target</span>
+          )}
         </p>
       </div>
 
@@ -192,16 +210,35 @@ export default function RulesPage() {
   const [selectedType, setSelectedType] = useState<RuleType | null>(null);
   const [asset, setAsset] = useState('');
   const [threshold, setThreshold] = useState(15);
+  const [stopLossMode, setStopLossMode] = useState<StopLossMode>('pct');
+  const [targetPrice, setTargetPrice] = useState('');
   const [saving, setSaving] = useState(false);
 
   // ── Fetch rules ─────────────────────────────────────────────────────────────
   const fetchRules = useCallback(async () => {
     if (!userId) return;
-    const { data, error } = await supabase
+
+    // Try to fetch with target_price first; fall back gracefully if the column
+    // doesn't exist yet (migration hasn't been run).
+    let { data, error } = await supabase
       .from('rules')
-      .select('id, rule_type, asset, threshold_pct, active')
+      .select('id, rule_type, asset, threshold_pct, target_price, active')
       .eq('user_id', userId)
       .order('created_at', { ascending: false });
+
+    if (error?.code === '42703') {
+      // Column doesn't exist yet — fetch without it and default to null
+      const fallback = await supabase
+        .from('rules')
+        .select('id, rule_type, asset, threshold_pct, active')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+      data = fallback.data;
+      error = fallback.error;
+      if (!error && data) {
+        data = (data as Omit<Rule, 'target_price'>[]).map((r) => ({ ...r, target_price: null })) as Rule[];
+      }
+    }
 
     if (error) {
       toast({ variant: 'destructive', title: 'Failed to load rules', description: error.message });
@@ -248,6 +285,8 @@ export default function RulesPage() {
     setSelectedType(null);
     setAsset('');
     setThreshold(15);
+    setStopLossMode('pct');
+    setTargetPrice('');
     setAddStep('type');
     setAdding(true);
   };
@@ -259,6 +298,8 @@ export default function RulesPage() {
     setSelectedType(type);
     setThreshold(RULE_META[type].defaultThreshold);
     setAsset('');
+    setStopLossMode('pct');
+    setTargetPrice('');
     setAddStep('details');
   };
 
@@ -271,25 +312,53 @@ export default function RulesPage() {
       return;
     }
 
+    // For price-target stop-loss, validate the price
+    const isPriceMode = selectedType === 'stop_loss' && stopLossMode === 'price';
+    const parsedPrice = isPriceMode ? parseFloat(targetPrice) : null;
+    if (isPriceMode && (isNaN(parsedPrice!) || parsedPrice! <= 0)) {
+      toast({ variant: 'destructive', title: 'Invalid price', description: 'Enter a valid positive target price.' });
+      return;
+    }
+
     setSaving(true);
+    const insertPayload: Record<string, unknown> = {
+      user_id:       userId,
+      rule_type:     selectedType,
+      asset:         trimmedAsset,
+      // threshold_pct is 0 for price-target rules (column may be NOT NULL)
+      threshold_pct: isPriceMode ? 0 : threshold,
+      target_price:  parsedPrice ?? null,
+      active:        true,
+    };
+
     const { data, error } = await supabase
       .from('rules')
-      .insert({
-        user_id: userId,
-        rule_type: selectedType,
-        asset: trimmedAsset,
-        threshold_pct: threshold,
-        active: true,
-      })
-      .select('id, rule_type, asset, threshold_pct, active')
+      .insert(insertPayload)
+      .select('id, rule_type, asset, threshold_pct, target_price, active')
       .single();
 
     if (error) {
-      toast({ variant: 'destructive', title: 'Failed to save rule', description: error.message });
+      // Graceful fallback if target_price column doesn't exist yet
+      if (error.code === '42703' && error.message.includes('target_price')) {
+        const { data: d2, error: e2 } = await supabase
+          .from('rules')
+          .insert({ ...insertPayload, target_price: undefined })
+          .select('id, rule_type, asset, threshold_pct, active')
+          .single();
+        if (e2) {
+          toast({ variant: 'destructive', title: 'Failed to save rule', description: e2.message });
+        } else {
+          setRules((prev) => [{ ...d2, target_price: null } as Rule, ...prev]);
+          setAdding(false);
+          toast({ title: 'Rule saved', description: ruleDescription({ ...d2, target_price: null } as Rule) });
+        }
+      } else {
+        toast({ variant: 'destructive', title: 'Failed to save rule', description: error.message });
+      }
     } else {
       setRules((prev) => [data as Rule, ...prev]);
       setAdding(false);
-      toast({ title: 'Rule saved', description: RULE_META[selectedType].plain(trimmedAsset, threshold) });
+      toast({ title: 'Rule saved', description: ruleDescription(data as Rule) });
     }
     setSaving(false);
   };
@@ -439,43 +508,110 @@ export default function RulesPage() {
                   />
                 </div>
 
-                {/* Threshold slider */}
-                <div className="space-y-3">
-                  <div className="flex items-baseline justify-between">
+                {/* Stop-loss mode toggle — only for stop_loss */}
+                {selectedType === 'stop_loss' && (
+                  <div className="space-y-2">
                     <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                      Threshold
+                      Trigger type
                     </label>
-                    <span className="text-xl font-semibold text-primary tabular-nums">
-                      {threshold}%
-                    </span>
+                    <div className="flex bg-input rounded-lg p-1 border border-border">
+                      <button
+                        type="button"
+                        onClick={() => setStopLossMode('pct')}
+                        className={`flex-1 text-xs font-medium py-2 px-2 rounded-md transition-colors ${
+                          stopLossMode === 'pct'
+                            ? 'bg-card text-foreground shadow-sm'
+                            : 'text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        Drop by %
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setStopLossMode('price')}
+                        className={`flex-1 text-xs font-medium py-2 px-2 rounded-md transition-colors ${
+                          stopLossMode === 'price'
+                            ? 'bg-card text-foreground shadow-sm'
+                            : 'text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        Exact price
+                      </button>
+                    </div>
                   </div>
+                )}
 
-                  <input
-                    type="range"
-                    min={meta.min}
-                    max={meta.max}
-                    step={meta.step}
-                    value={threshold}
-                    onChange={(e) => setThreshold(Number(e.target.value))}
-                    data-testid="slider-threshold"
-                    className="w-full accent-primary h-2 cursor-pointer"
-                  />
+                {/* Threshold — shown for pct mode OR non-stop_loss rules */}
+                {!(selectedType === 'stop_loss' && stopLossMode === 'price') && (
+                  <div className="space-y-3">
+                    <div className="flex items-baseline justify-between">
+                      <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                        Threshold
+                      </label>
+                      <span className="text-xl font-semibold text-primary tabular-nums">
+                        {threshold}%
+                      </span>
+                    </div>
 
-                  <div className="flex justify-between text-xs text-muted-foreground/60">
-                    <span>{meta.min}%</span>
-                    <span>{meta.max}%</span>
+                    <input
+                      type="range"
+                      min={meta.min}
+                      max={meta.max}
+                      step={meta.step}
+                      value={threshold}
+                      onChange={(e) => setThreshold(Number(e.target.value))}
+                      data-testid="slider-threshold"
+                      className="w-full accent-primary h-2 cursor-pointer"
+                    />
+
+                    <div className="flex justify-between text-xs text-muted-foreground/60">
+                      <span>{meta.min}%</span>
+                      <span>{meta.max}%</span>
+                    </div>
+
+                    <p className="text-xs text-muted-foreground/80 leading-relaxed bg-muted/30 rounded-lg p-3">
+                      {meta.helperText(threshold)}
+                    </p>
                   </div>
+                )}
 
-                  <p className="text-xs text-muted-foreground/80 leading-relaxed bg-muted/30 rounded-lg p-3">
-                    {meta.helperText(threshold)}
-                  </p>
-                </div>
+                {/* Price target — shown for stop_loss + price mode */}
+                {selectedType === 'stop_loss' && stopLossMode === 'price' && (
+                  <div className="space-y-2">
+                    <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                      Target price (USD)
+                    </label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground font-medium pointer-events-none">
+                        $
+                      </span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="any"
+                        value={targetPrice}
+                        onChange={(e) => setTargetPrice(e.target.value)}
+                        placeholder="e.g. 58000"
+                        data-testid="input-target-price"
+                        className="w-full h-11 rounded-lg bg-input border border-border pl-7 pr-3 text-sm font-mono text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-primary"
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground/80 leading-relaxed bg-muted/30 rounded-lg p-3">
+                      Guardian will place a market sell if the {asset.trim() || 'asset'} price falls to or below this value.
+                    </p>
+                  </div>
+                )}
 
                 {/* Preview */}
                 {asset.trim() && (
                   <div className="rounded-lg bg-primary/5 border border-primary/20 px-3 py-2">
                     <p className="text-xs text-primary/80 font-medium">
-                      {meta.plain(asset.trim().toUpperCase(), threshold)}
+                      {selectedType === 'stop_loss' && stopLossMode === 'price'
+                        ? targetPrice
+                          ? `Sell ${asset.trim().toUpperCase()} if price drops to ${parseFloat(targetPrice).toLocaleString()}`
+                          : `Sell ${asset.trim().toUpperCase()} if price drops to… (enter a price above)`
+                        : meta.plain(asset.trim().toUpperCase(), threshold)
+                      }
                     </p>
                   </div>
                 )}
@@ -491,7 +627,11 @@ export default function RulesPage() {
                   </Button>
                   <Button
                     onClick={handleSave}
-                    disabled={saving || !asset.trim()}
+                    disabled={
+                      saving ||
+                      !asset.trim() ||
+                      (selectedType === 'stop_loss' && stopLossMode === 'price' && !targetPrice.trim())
+                    }
                     className="flex-1 h-10 text-sm bg-primary hover:bg-primary/90 text-primary-foreground font-medium"
                     data-testid="btn-save-rule"
                   >

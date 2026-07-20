@@ -176,7 +176,9 @@ export async function fetchPortfolio(conn: OkxConnection): Promise<PortfolioData
       usdValue: parseFloat(d.eqUsd) || 0,
       pct: totalUsd > 0 ? (parseFloat(d.eqUsd) / totalUsd) * 100 : 0,
     }))
-    .filter((a) => a.usdValue > 0.001)
+    // Show every asset with a real balance. Exclude only true zero-balance
+    // entries (can appear as floating-point noise in the OKX response).
+    .filter((a) => a.balance > 0)
     .sort((a, b) => b.usdValue - a.usdValue);
 
   return { totalUsd, assets };

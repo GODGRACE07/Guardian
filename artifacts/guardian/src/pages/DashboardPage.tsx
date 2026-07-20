@@ -59,6 +59,35 @@ function fmtBal(n: number): string {
   return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
+// ─── Coin icon ────────────────────────────────────────────────────────────────
+// Uses CoinCap's public CDN — no API key required, keyed by lowercase symbol.
+// Falls back to a lettered placeholder if the icon URL 404s.
+
+function CoinIcon({ symbol }: { symbol: string }) {
+  const [failed, setFailed] = useState(false);
+
+  if (failed) {
+    return (
+      <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+        <span className="text-[11px] font-bold text-primary leading-none select-none">
+          {symbol.slice(0, 2)}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={`https://assets.coincap.io/assets/icons/${symbol.toLowerCase()}@2x.png`}
+      alt={symbol}
+      width={32}
+      height={32}
+      className="w-8 h-8 rounded-full shrink-0 object-contain bg-white/5"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 // ─── Sub-sections ─────────────────────────────────────────────────────────────
 
 function PortfolioSection({
@@ -170,20 +199,18 @@ function PortfolioSection({
         <ul className="divide-y divide-card-border/40">
           {data.assets.map((a) => (
             <li key={a.symbol} className="px-5 py-3 flex items-center gap-3">
-              {/* Symbol badge */}
-              <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
-                <span className="text-[10px] font-bold text-primary">
-                  {a.symbol.slice(0, 3)}
-                </span>
-              </div>
-              {/* Name + amount */}
+              {/* Coin icon — real logo from CoinCap CDN, lettered fallback */}
+              <CoinIcon symbol={a.symbol} />
+
+              {/* Symbol + exact amount held */}
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-foreground">{a.symbol}</p>
                 <p className="text-xs text-muted-foreground tabular-nums">
-                  {fmtBal(a.balance)}
+                  {fmtBal(a.balance)}&nbsp;{a.symbol}
                 </p>
               </div>
-              {/* Value + bar */}
+
+              {/* USD value + % bar */}
               <div className="text-right shrink-0 space-y-1">
                 <p className="text-sm font-medium text-foreground tabular-nums">
                   {fmtUsd(a.usdValue)}

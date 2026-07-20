@@ -60,7 +60,8 @@ interface DbRule {
   user_id: string;
   rule_type: 'stop_loss' | 'concentration_alert' | 'rebalance_alert';
   asset: string;
-  threshold_pct: number;
+  threshold_pct: number | null;
+  target_price: number | null;
   active: boolean;
 }
 
@@ -136,7 +137,23 @@ function evaluateRule(
 
     const currentPrice = asset.usdValue / asset.balance;
 
-    // First observation — record baseline, don't trigger
+    // ── Price-target mode ────────────────────────────────────────────────────
+    // No baseline needed — fire immediately when price ≤ target_price.
+    if (rule.target_price != null && rule.target_price > 0) {
+      if (currentPrice <= rule.target_price) {
+        return {
+          triggered: true,
+          reason: `Stop-loss triggered: ${rule.asset} price ${currentPrice.toFixed(4)} reached target ${rule.target_price.toFixed(4)}`,
+        };
+      }
+      return {
+        triggered: false,
+        reason: `Current ${currentPrice.toFixed(4)} > target ${rule.target_price.toFixed(4)}`,
+      };
+    }
+
+    // ── Percentage-drop mode (original logic) ────────────────────────────────
+    // First observation — record baseline, don't trigger this cycle.
     if (!pricePerUnit.has(rule.id)) {
       pricePerUnit.set(rule.id, currentPrice);
       logger.debug(
@@ -149,17 +166,18 @@ function evaluateRule(
     const basePrice = pricePerUnit.get(rule.id)!;
     if (basePrice <= 0) return { triggered: false, reason: 'Invalid baseline price' };
 
-    const dropPct = ((basePrice - currentPrice) / basePrice) * 100;
+    const threshold = rule.threshold_pct ?? 0;
+    const dropPct   = ((basePrice - currentPrice) / basePrice) * 100;
 
-    if (dropPct >= rule.threshold_pct) {
+    if (dropPct >= threshold) {
       return {
         triggered: true,
-        reason: `Stop-loss triggered: ${rule.asset} dropped ${dropPct.toFixed(2)}% from entry ($${basePrice.toFixed(4)} → $${currentPrice.toFixed(4)})`,
+        reason: `Stop-loss triggered: ${rule.asset} dropped ${dropPct.toFixed(2)}% from entry (${basePrice.toFixed(4)} → ${currentPrice.toFixed(4)})`,
         dropPct,
       };
     }
 
-    return { triggered: false, reason: `Drop ${dropPct.toFixed(2)}% < threshold ${rule.threshold_pct}%` };
+    return { triggered: false, reason: `Drop ${dropPct.toFixed(2)}% < threshold ${threshold}%` };
   }
 
   if (rule.rule_type === 'concentration_alert' || rule.rule_type === 'rebalance_alert') {
@@ -355,7 +373,7 @@ async function runCycle(): Promise<void> {
 
   const { data: allRules, error: rulesErr } = await supabase
     .from('rules')
-    .select('id, user_id, rule_type, asset, threshold_pct, active')
+    .select('id, user_id, rule_type, asset, threshold_pct, target_price, active')
     .in('user_id', userIds)
     .eq('active', true);
 

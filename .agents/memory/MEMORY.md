@@ -1,0 +1,1 @@
+- [Guardian background worker architecture](worker-architecture.md) — Stage 5 lives in api-server; node:crypto HMAC; in-memory ref prices + cooldowns; target_price column graceful fallback

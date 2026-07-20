@@ -1,6 +1,6 @@
-# [Project name]
+# Guardian
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Portfolio protection app for OKX — monitors trading rules in the background and alerts users when stop-loss or price conditions are triggered.
 
 ## Run & Operate
 

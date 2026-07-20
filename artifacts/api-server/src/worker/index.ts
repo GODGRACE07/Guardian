@@ -23,6 +23,7 @@
 import { logger } from '../lib/logger.js';
 import { supabase } from './supabase.js';
 import { fetchPortfolio, placeMarketSell, type OkxConnection } from './okx.js';
+import { logTradeEntry, type DbConnection, type DbRule } from './executor.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -44,27 +45,6 @@ const pricePerUnit = new Map<string, number>();
  */
 const lastFired = new Map<string, Date>();
 
-// ─── DB row shapes ────────────────────────────────────────────────────────────
-
-interface DbConnection {
-  id: string;
-  user_id: string;
-  api_key: string;
-  api_secret: string;
-  api_passphrase: string;
-  is_demo: boolean;
-}
-
-interface DbRule {
-  id: string;
-  user_id: string;
-  rule_type: 'stop_loss' | 'concentration_alert' | 'rebalance_alert';
-  asset: string;
-  threshold_pct: number | null;
-  target_price: number | null;
-  active: boolean;
-}
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function isOnCooldown(ruleId: string, windowMs: number): boolean {
@@ -75,44 +55,6 @@ function isOnCooldown(ruleId: string, windowMs: number): boolean {
 
 function markFired(ruleId: string): void {
   lastFired.set(ruleId, new Date());
-}
-
-async function logTradeEntry(entry: {
-  user_id: string;
-  rule_id: string;
-  asset: string;
-  action: string;
-  reason: string;
-  amount?: string;
-}): Promise<void> {
-  const { error } = await supabase.from('trade_log').insert({
-    user_id:    entry.user_id,
-    rule_id:    entry.rule_id,
-    asset:      entry.asset,
-    action:     entry.action,
-    reason:     entry.reason,
-    amount:     entry.amount ?? null,
-    created_at: new Date().toISOString(),
-  });
-
-  if (error) {
-    // trade_log schema might not have rule_id — fall back to inserting without it
-    if (error.message.includes('rule_id') || error.code === '42703') {
-      const { error: e2 } = await supabase.from('trade_log').insert({
-        user_id:    entry.user_id,
-        asset:      entry.asset,
-        action:     entry.action,
-        reason:     entry.reason,
-        amount:     entry.amount ?? null,
-        created_at: new Date().toISOString(),
-      });
-      if (e2) {
-        logger.warn({ err: e2, entry }, '[worker] trade_log insert failed (fallback)');
-      }
-    } else {
-      logger.warn({ err: error, entry }, '[worker] trade_log insert failed');
-    }
-  }
 }
 
 // ─── Rule evaluation ──────────────────────────────────────────────────────────

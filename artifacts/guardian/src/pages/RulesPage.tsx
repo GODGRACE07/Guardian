@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Fragment } from 'react';
 import { useLocation } from 'wouter';
 import {
   ShieldCheck,
@@ -12,6 +12,7 @@ import {
   ToggleLeft,
   ToggleRight,
   LogOut,
+  FlaskConical,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
@@ -118,10 +119,12 @@ function RuleCard({
   rule,
   onToggle,
   onDelete,
+  onTestTrigger,
 }: {
   rule: Rule;
   onToggle: (id: string, active: boolean) => void;
   onDelete: (id: string) => void;
+  onTestTrigger: (id: string) => void;
 }) {
   const meta = RULE_META[rule.rule_type];
 
@@ -165,6 +168,16 @@ function RuleCard({
 
       {/* Controls */}
       <div className="flex items-center gap-1 shrink-0 ml-1">
+        {/* Test Trigger — amber flask icon, clearly a testing action */}
+        <button
+          onClick={() => onTestTrigger(rule.id)}
+          className="text-amber-500/50 hover:text-amber-500 transition-colors p-1"
+          aria-label="Test trigger — manually fire this rule now"
+          title="Test Trigger"
+          data-testid={`test-trigger-${rule.id}`}
+        >
+          <FlaskConical className="w-4 h-4" />
+        </button>
         <button
           onClick={() => onToggle(rule.id, rule.active)}
           className={[
@@ -203,6 +216,10 @@ export default function RulesPage() {
   // ── Data state ──────────────────────────────────────────────────────────────
   const [rules, setRules] = useState<Rule[]>([]);
   const [loadingRules, setLoadingRules] = useState(true);
+
+  // ── Test Trigger state ──────────────────────────────────────────────────────
+  const [confirmingTestId, setConfirmingTestId] = useState<string | null>(null);
+  const [testTriggering, setTestTriggering] = useState(false);
 
   // ── Add-rule form state ─────────────────────────────────────────────────────
   const [adding, setAdding] = useState(false);
@@ -363,6 +380,30 @@ export default function RulesPage() {
     setSaving(false);
   };
 
+  // ── Test Trigger ────────────────────────────────────────────────────────────
+  const handleTestTrigger = async (ruleId: string) => {
+    if (!userId) return;
+    setTestTriggering(true);
+    try {
+      const res = await fetch(`/api/rules/${ruleId}/test-trigger`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId }),
+      });
+      const json = await res.json() as { ok?: boolean; action?: string; reason?: string; tradeError?: string; error?: string };
+      if (!res.ok) throw new Error(json.error ?? 'Unknown error');
+      const description = json.tradeError
+        ? `Order failed: ${json.tradeError}`
+        : json.action ?? 'Rule executed';
+      toast({ title: '🧪 Test trigger fired', description });
+      setConfirmingTestId(null);
+    } catch (err: unknown) {
+      toast({ variant: 'destructive', title: 'Test trigger failed', description: (err as Error).message });
+    } finally {
+      setTestTriggering(false);
+    }
+  };
+
   // ── Sign out ────────────────────────────────────────────────────────────────
   const handleSignOut = () => {
     clearWalletSession(); // removes guardian_wallet_session from localStorage
@@ -411,12 +452,62 @@ export default function RulesPage() {
         ) : (
           <div className="space-y-2">
             {rules.map((rule) => (
-              <RuleCard
-                key={rule.id}
-                rule={rule}
-                onToggle={handleToggle}
-                onDelete={handleDelete}
-              />
+              <Fragment key={rule.id}>
+                <RuleCard
+                  rule={rule}
+                  onToggle={handleToggle}
+                  onDelete={handleDelete}
+                  onTestTrigger={(id) => {
+                    setConfirmingTestId(confirmingTestId === id ? null : id);
+                  }}
+                />
+
+                {/* ── Test Trigger confirmation panel ── */}
+                {confirmingTestId === rule.id && (
+                  <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 space-y-3 -mt-1">
+                    {/* Label */}
+                    <div className="flex items-center gap-2">
+                      <FlaskConical className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                      <p className="text-xs font-semibold text-amber-400 uppercase tracking-wide">
+                        Test Trigger
+                      </p>
+                    </div>
+
+                    {/* Explanation */}
+                    <p className="text-xs text-amber-400/75 leading-relaxed">
+                      This will immediately execute this rule's action for demo
+                      purposes, ignoring current market conditions.{' '}
+                      {rule.rule_type === 'stop_loss'
+                        ? 'A real market sell order will be placed via OKX (respecting demo/live mode).'
+                        : 'An alert entry will be written to your Activity Log.'}
+                    </p>
+
+                    {/* Buttons */}
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setConfirmingTestId(null)}
+                        disabled={testTriggering}
+                        className="flex-1 text-xs border-amber-500/30 text-amber-400/70 hover:text-amber-400 hover:bg-amber-500/5"
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => handleTestTrigger(rule.id)}
+                        disabled={testTriggering}
+                        className="flex-1 text-xs bg-amber-500 hover:bg-amber-400 text-black font-semibold gap-1.5"
+                      >
+                        {testTriggering
+                          ? <Loader2 className="w-3 h-3 animate-spin" />
+                          : <FlaskConical className="w-3 h-3" />}
+                        {testTriggering ? 'Triggering…' : 'Confirm'}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </Fragment>
             ))}
           </div>
         )}

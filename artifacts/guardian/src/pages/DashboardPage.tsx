@@ -46,9 +46,9 @@ function relativeTime(iso?: string): string {
 }
 
 function fmtUsd(n: number): string {
-  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1_000)     return `$${(n / 1_000).toFixed(2)}K`;
-  return `$${n.toFixed(2)}`;
+  // Full exact dollar amount with comma separators and two decimal places.
+  // e.g. $64,220.45 — never abbreviated like $64.22K
+  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function fmtBal(n: number): string {

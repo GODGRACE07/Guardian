@@ -30,9 +30,10 @@ export interface OkxConnection {
 }
 
 export interface AssetBalance {
-  ccy: string;    // e.g. "BTC"
-  bal: string;    // total balance as string
-  eqUsd: string;  // USD equivalent as string
+  ccy: string;      // e.g. "BTC"
+  cashBal: string;  // cash balance as string (field name in OKX API response)
+  eq: string;       // total equity of the currency (includes unrealized P&L)
+  eqUsd: string;    // USD equivalent as string
 }
 
 export interface PortfolioData {
@@ -169,17 +170,22 @@ export async function fetchPortfolio(conn: OkxConnection): Promise<PortfolioData
 
   const totalUsd = parseFloat(account.totalEq) || 0;
 
+  // OKX details items use `cashBal` for the cash balance and `eqUsd` for the
+  // USD equivalent.  There is NO `bal` field on detail items — using it always
+  // yields undefined → 0, which filters every asset out.
   const assets = (account.details ?? [])
     .map((d) => ({
       symbol:   d.ccy,
-      balance:  parseFloat(d.bal)   || 0,
-      usdValue: parseFloat(d.eqUsd) || 0,
+      balance:  parseFloat(d.cashBal) || 0,
+      usdValue: parseFloat(d.eqUsd)   || 0,
       pct: totalUsd > 0 ? (parseFloat(d.eqUsd) / totalUsd) * 100 : 0,
     }))
     // Show every asset with a real balance. Exclude only true zero-balance
     // entries (can appear as floating-point noise in the OKX response).
     .filter((a) => a.balance > 0)
     .sort((a, b) => b.usdValue - a.usdValue);
+
+  console.debug('[fetchPortfolio] assets about to render:', assets);
 
   return { totalUsd, assets };
 }

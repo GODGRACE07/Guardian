@@ -88,6 +88,25 @@ async function parseOkxResponse(
   return json.data;
 }
 
+// ─── Timeout helper ───────────────────────────────────────────────────────────
+
+/**
+ * All OKX HTTP calls share this timeout (milliseconds).
+ * Without a timeout, a slow/hung OKX response leaves the Express request
+ * open indefinitely. Replit's reverse proxy will eventually kill the idle
+ * client connection first, delivering a zero-byte body to the browser —
+ * which the frontend's `res.json()` sees as "Unexpected end of JSON input".
+ */
+const OKX_TIMEOUT_MS = 15_000;
+
+function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), OKX_TIMEOUT_MS);
+  return fetch(url, { ...init, signal: controller.signal }).finally(() =>
+    clearTimeout(timer),
+  );
+}
+
 export async function okxGet(
   conn: OkxConnection,
   path: string,
@@ -97,7 +116,7 @@ export async function okxGet(
   const requestPath = path + qs;
   const headers     = buildHeaders(conn, 'GET', requestPath);
 
-  const res = await fetch(OKX_BASE + requestPath, { method: 'GET', headers });
+  const res = await fetchWithTimeout(OKX_BASE + requestPath, { method: 'GET', headers });
   return parseOkxResponse(res, path);
 }
 
@@ -109,7 +128,7 @@ export async function okxPost(
   const bodyStr = JSON.stringify(body);
   const headers = buildHeaders(conn, 'POST', path, bodyStr);
 
-  const res = await fetch(OKX_BASE + path, {
+  const res = await fetchWithTimeout(OKX_BASE + path, {
     method:  'POST',
     headers,
     body:    bodyStr,

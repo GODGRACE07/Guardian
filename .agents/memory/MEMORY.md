@@ -1,3 +1,4 @@
 - [Guardian background worker architecture](worker-architecture.md) — Stage 5 lives in api-server; node:crypto HMAC; in-memory ref prices + cooldowns; target_price column graceful fallback
 - [trade_log Supabase schema](trade-log-schema.md) — only 6 cols: id, user_id, action_taken (NOT NULL), asset, reason, details; no action/rule_id/amount columns
 - [Manual Buy Feature](buy-feature.md) — OKX tgtCcy param is required for market buys; route at POST /api/trade/buy; BuySheet component fetches public ticker for price estimate
+- [API server error hardening](api-error-hardening.md) — OKX fetch timeout (15s AbortController), global JSON error middleware in app.ts, full try/catch in all routes, process unhandledRejection handler

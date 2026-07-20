@@ -17,6 +17,11 @@
  * Reply:
  *   { ok: true, orderId: string, asset: string }
  *   { error: string } on failure (400 for validation / balance issues, 500 otherwise)
+ *
+ * Error guarantee: the ENTIRE async body — including Supabase queries and OKX
+ * calls — is wrapped in one try/catch so any throw always produces a valid JSON
+ * error response. The global error-handling middleware in app.ts is the
+ * additional backstop for anything we miss here.
  */
 
 import { Router } from 'express';
@@ -35,8 +40,11 @@ router.post('/trade/buy', async (req, res) => {
     amount?: number;
     estimatedPrice?: number;
   };
+  const t0 = Date.now();
 
-  // ── Input validation ───────────────────────────────────────────────────────
+  logger.info({ userId, asset, mode, amount }, '[buy] → received');
+
+  // ── Input validation (synchronous) ────────────────────────────────────────
   if (!userId) {
     res.status(400).json({ error: 'userId is required' });
     return;
@@ -55,31 +63,40 @@ router.post('/trade/buy', async (req, res) => {
     return;
   }
 
-  // ── Load OKX connection ────────────────────────────────────────────────────
-  const { data: conn, error: connErr } = await supabase
-    .from('okx_connections')
-    .select('id, user_id, api_key, api_secret, api_passphrase, is_demo')
-    .eq('user_id', userId)
-    .eq('active', true)
-    .maybeSingle();
-
-  if (connErr || !conn) {
-    res.status(400).json({ error: 'No active OKX connection found' });
-    return;
-  }
-
-  const okxConn: OkxConnection = {
-    api_key:        conn.api_key        as string,
-    api_secret:     conn.api_secret     as string,
-    api_passphrase: conn.api_passphrase as string,
-    is_demo:        conn.is_demo        as boolean,
-  };
-
-  // ── Place the order ────────────────────────────────────────────────────────
+  // ── ALL async I/O in one try/catch ────────────────────────────────────────
   try {
-    const { orderId } = await placeMarketBuy(okxConn, asset, mode, numAmount);
 
-    // Build human-readable strings for the trade log
+    // Step 1: load the user's active OKX connection from Supabase
+    logger.info({ userId, asset }, '[buy] step 1 — querying OKX connection from Supabase');
+    const { data: conn, error: connErr } = await supabase
+      .from('okx_connections')
+      .select('id, user_id, api_key, api_secret, api_passphrase, is_demo')
+      .eq('user_id', userId)
+      .eq('active', true)
+      .maybeSingle();
+
+    if (connErr || !conn) {
+      logger.warn({ userId, connErr }, '[buy] no active OKX connection');
+      res.status(400).json({ error: 'No active OKX connection found' });
+      return;
+    }
+
+    const okxConn: OkxConnection = {
+      api_key:        conn.api_key        as string,
+      api_secret:     conn.api_secret     as string,
+      api_passphrase: conn.api_passphrase as string,
+      is_demo:        conn.is_demo        as boolean,
+    };
+
+    // Step 2: place the market buy order via OKX
+    logger.info(
+      { userId, asset, mode, amount: numAmount, isDemo: conn.is_demo },
+      '[buy] step 2 — calling OKX trade/order API',
+    );
+    const { orderId } = await placeMarketBuy(okxConn, asset, mode, numAmount);
+    logger.info({ userId, asset, orderId }, '[buy] step 2 ✅ OKX order accepted');
+
+    // Step 3: log the purchase to trade_log
     const amountStr = mode === 'spend'
       ? `$${numAmount.toFixed(2)} USD`
       : `${numAmount} ${asset}`;
@@ -87,6 +104,7 @@ router.post('/trade/buy', async (req, res) => {
       ? ` @ ~$${estimatedPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/coin`
       : '';
 
+    logger.info({ userId, asset, orderId }, '[buy] step 3 — writing to trade_log');
     await logTradeEntry({
       user_id: conn.user_id as string,
       rule_id: '',   // no rule — this is a manual user action
@@ -96,23 +114,25 @@ router.post('/trade/buy', async (req, res) => {
       amount:  amountStr,
     });
 
-    logger.info(
-      { userId, asset, mode, amount: numAmount, orderId, isDemo: conn.is_demo },
-      '[trade] ✅ manual buy placed',
-    );
-
+    // Step 4: respond
+    const ms = Date.now() - t0;
+    logger.info({ userId, asset, orderId, ms }, '[buy] ✅ complete — sending response');
     res.json({ ok: true, orderId, asset });
-  } catch (err: unknown) {
-    const msg = (err as Error).message ?? String(err);
-    logger.error({ userId, asset, mode, amount: numAmount, err: msg }, '[trade] ❌ manual buy FAILED');
 
-    // Distinguish balance errors so the frontend can show a clearer message
-    const isBalanceError = /insufficient|balance|not enough|funds/i.test(msg);
-    res.status(isBalanceError ? 400 : 500).json({
-      error: isBalanceError
-        ? `Insufficient USDT balance to complete this purchase. (${msg})`
-        : msg,
-    });
+  } catch (err: unknown) {
+    const ms = Date.now() - t0;
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ userId, asset, mode, amount: numAmount, err: msg, ms }, '[buy] ❌ unhandled error — sending JSON 500');
+
+    if (!res.headersSent) {
+      // Distinguish balance errors so the frontend can show a clearer message
+      const isBalanceError = /insufficient|balance|not enough|funds/i.test(msg);
+      res.status(isBalanceError ? 400 : 500).json({
+        error: isBalanceError
+          ? `Insufficient USDT balance to complete this purchase. (${msg})`
+          : msg,
+      });
+    }
   }
 });
 

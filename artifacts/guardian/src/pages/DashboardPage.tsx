@@ -8,6 +8,7 @@ import {
   ChevronRight,
   Zap,
   LogOut,
+  TrendingUp,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
@@ -15,6 +16,7 @@ import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
 import { fetchPortfolio, type PortfolioData, type OkxConnection } from '@/lib/okx';
 import { BottomNav } from '@/components/BottomNav';
+import { BuySheet } from '@/components/BuySheet';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -379,6 +381,15 @@ export default function DashboardPage() {
   // Supabase row id — stored separately so we can deactivate the row on disconnect
   const connIdRef = useRef<string | null>(null);
 
+  // ── Buy sheet state ────────────────────────────────────────────────────────
+  const [buyOpen, setBuyOpen] = useState(false);
+  const [buyDefaultAsset, setBuyDefaultAsset] = useState<string | undefined>(undefined);
+
+  const openBuy = (asset?: string) => {
+    setBuyDefaultAsset(asset);
+    setBuyOpen(true);
+  };
+
   // ── Disconnect confirmation state ──────────────────────────────────────────
   const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
   const [isDisconnecting, setIsDisconnecting] = useState(false);
@@ -585,6 +596,23 @@ export default function DashboardPage() {
           </div>
         )}
 
+        {/* Quick Buy action — only shown when a connection is active */}
+        {portfolioState.status === 'ok' && (
+          <button
+            onClick={() => openBuy()}
+            className="w-full rounded-xl border border-card-border bg-card px-4 py-3 flex items-center gap-3 hover:border-primary/30 transition-colors group text-left"
+          >
+            <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+              <TrendingUp className="w-4 h-4 text-primary" />
+            </div>
+            <div className="flex-1">
+              <p className="text-sm font-medium text-foreground">Buy Crypto</p>
+              <p className="text-xs text-muted-foreground">Place a market order on OKX</p>
+            </div>
+            <ChevronRight className="w-4 h-4 text-muted-foreground/50 group-hover:text-muted-foreground transition-colors" />
+          </button>
+        )}
+
         {/* Active protection summary */}
         <ActiveRulesRow count={activeRuleCount} />
 
@@ -596,6 +624,22 @@ export default function DashboardPage() {
           onRefresh={handleLogRefresh}
         />
       </div>
+
+      {/* Buy sheet — rendered at page level so it overlays everything */}
+      <BuySheet
+        open={buyOpen}
+        onOpenChange={setBuyOpen}
+        defaultAsset={buyDefaultAsset}
+        portfolioAssets={
+          portfolioState.status === 'ok'
+            ? portfolioState.data.assets.map((a) => a.symbol)
+            : []
+        }
+        userId={userId ?? ''}
+        onSuccess={() => {
+          handleLogRefresh();
+        }}
+      />
 
       <BottomNav />
     </div>

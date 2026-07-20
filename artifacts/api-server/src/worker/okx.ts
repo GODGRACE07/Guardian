@@ -146,6 +146,30 @@ export async function fetchPortfolio(conn: OkxConnection): Promise<PortfolioData
   return { totalUsd, assets };
 }
 
+// ─── Spot ticker (public — no auth required) ──────────────────────────────────
+
+export interface TickerData {
+  last: number;   // last traded price in USDT
+}
+
+/**
+ * Fetches the current spot ticker for `asset`-USDT.
+ * Uses the public OKX market endpoint — no API credentials required.
+ */
+export async function fetchTicker(asset: string): Promise<TickerData> {
+  const instId = `${asset}-USDT`;
+  const res = await fetch(`${OKX_BASE}/api/v5/market/ticker?instId=${instId}`);
+  const json = await res.json() as { code: string; msg?: string; data?: Array<{ last: string }> };
+
+  if (json.code !== '0') {
+    throw new Error(`OKX ticker [${json.code}]: ${json.msg ?? 'unknown error'}`);
+  }
+
+  const last = parseFloat(json.data?.[0]?.last ?? '0');
+  if (!last) throw new Error(`No price data for ${instId}`);
+  return { last };
+}
+
 // ─── Market sell ──────────────────────────────────────────────────────────────
 
 export interface SellResult {
@@ -187,6 +211,62 @@ export async function placeMarketSell(
   if (!order) throw new Error('OKX returned no order data.');
 
   // Per-order status is in sCode/sMsg — "0" means the order was accepted.
+  if (order.sCode !== '0') {
+    throw new Error(`OKX order rejected [${order.sCode}]: ${order.sMsg}`);
+  }
+
+  return { orderId: order.ordId, clientOrderId: order.clOrdId };
+}
+
+// ─── Market buy ───────────────────────────────────────────────────────────────
+
+export interface BuyResult {
+  orderId: string;
+  clientOrderId: string;
+}
+
+/**
+ * Places a market buy order for `asset` against USDT.
+ *
+ * mode='spend': sz is a USDT amount (OKX tgtCcy=quote_ccy) — "spend $500"
+ * mode='buy':   sz is the coin quantity to receive (OKX tgtCcy=base_ccy) — "buy 0.5 ETH"
+ *
+ * For demo accounts the x-simulated-trading header is included automatically.
+ */
+export async function placeMarketBuy(
+  conn: OkxConnection,
+  asset: string,
+  mode: 'spend' | 'buy',
+  amount: number,
+): Promise<BuyResult> {
+  // Spend mode → 2 dp (USDT). Buy mode → 8 dp (coin), trailing zeros stripped.
+  const sz = mode === 'spend'
+    ? amount.toFixed(2)
+    : amount.toFixed(8).replace(/\.?0+$/, '');
+
+  const body: Record<string, string> = {
+    instId:  `${asset}-USDT`,
+    tdMode:  'cash',      // spot trading
+    side:    'buy',
+    ordType: 'market',
+    sz,
+    // tgtCcy tells OKX how to interpret sz:
+    //   quote_ccy → sz is in USDT (spend a dollar amount)
+    //   base_ccy  → sz is in the asset being purchased
+    tgtCcy:  mode === 'spend' ? 'quote_ccy' : 'base_ccy',
+  };
+
+  const result = await okxPost(conn, '/api/v5/trade/order', body) as Array<{
+    ordId: string;
+    clOrdId: string;
+    sCode: string;
+    sMsg: string;
+  }>;
+
+  const order = result[0];
+  if (!order) throw new Error('OKX returned no order data.');
+
+  // Per-order status: "0" means accepted.
   if (order.sCode !== '0') {
     throw new Error(`OKX order rejected [${order.sCode}]: ${order.sMsg}`);
   }

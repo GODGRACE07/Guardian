@@ -41,33 +41,21 @@ export async function logTradeEntry(entry: {
   reason: string;
   amount?: string;
 }): Promise<void> {
+  // trade_log columns: id, user_id, action_taken (NOT NULL), asset, reason, details, created_at
+  // rule_id and amount are not columns — amount goes into `details`.
+  const details = entry.amount ? `amount: ${entry.amount}` : null;
+
   const { error } = await supabase.from('trade_log').insert({
-    user_id:    entry.user_id,
-    rule_id:    entry.rule_id,
-    asset:      entry.asset,
-    action:     entry.action,
-    reason:     entry.reason,
-    amount:     entry.amount ?? null,
-    created_at: new Date().toISOString(),
+    user_id:      entry.user_id,
+    asset:        entry.asset,
+    action_taken: entry.action,
+    reason:       entry.reason,
+    details,
+    created_at:   new Date().toISOString(),
   });
 
   if (error) {
-    // trade_log schema might not have rule_id — fall back to inserting without it
-    if (error.message.includes('rule_id') || error.code === '42703') {
-      const { error: e2 } = await supabase.from('trade_log').insert({
-        user_id:    entry.user_id,
-        asset:      entry.asset,
-        action:     entry.action,
-        reason:     entry.reason,
-        amount:     entry.amount ?? null,
-        created_at: new Date().toISOString(),
-      });
-      if (e2) {
-        logger.warn({ err: e2, entry }, '[executor] trade_log insert failed (fallback)');
-      }
-    } else {
-      logger.warn({ err: error, entry }, '[executor] trade_log insert failed');
-    }
+    logger.warn({ err: error, entry }, '[executor] trade_log insert failed');
   }
 }
 

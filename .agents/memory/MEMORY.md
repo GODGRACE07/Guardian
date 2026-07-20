@@ -1,1 +1,2 @@
 - [Guardian background worker architecture](worker-architecture.md) — Stage 5 lives in api-server; node:crypto HMAC; in-memory ref prices + cooldowns; target_price column graceful fallback
+- [trade_log Supabase schema](trade-log-schema.md) — only 6 cols: id, user_id, action_taken (NOT NULL), asset, reason, details; no action/rule_id/amount columns

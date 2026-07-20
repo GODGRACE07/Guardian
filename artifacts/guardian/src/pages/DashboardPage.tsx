@@ -20,10 +20,10 @@ import { BottomNav } from '@/components/BottomNav';
 
 interface TradeLogEntry {
   id: string;
-  action?: string;
+  action_taken?: string;  // NOT NULL column — the action label
   asset?: string;
   reason?: string;
-  amount?: number | string;
+  details?: string | null; // nullable — holds "amount: X" or orderId info
   created_at?: string;
   [key: string]: unknown;
 }
@@ -306,12 +306,14 @@ function ActivityLog({
       ) : (
         <div className="rounded-2xl border border-card-border bg-card divide-y divide-card-border/40 overflow-hidden">
           {entries.map((entry) => {
-            // Gracefully handle unknown column layouts
-            const action  = String(entry.action  ?? entry.rule_type ?? entry.type ?? 'Action');
-            const asset   = String(entry.asset   ?? entry.symbol   ?? '—');
-            const reason  = String(entry.reason  ?? entry.description ?? entry.notes ?? '');
-            const amount  = entry.amount != null ? String(entry.amount) : null;
-            const ts      = entry.created_at ?? entry.timestamp ?? entry.executed_at;
+            // trade_log columns: id, user_id, action_taken, asset, reason, details, created_at
+            const action = String(entry.action_taken ?? entry.action ?? 'Action');
+            const asset  = String(entry.asset ?? '—');
+            const reason = String(entry.reason ?? '');
+            const amount = entry.details
+              ? String(entry.details).replace(/^amount:\s*/, '')
+              : null;
+            const ts = entry.created_at;
 
             return (
               <div key={entry.id} className="px-4 py-3 flex gap-3 items-start">

@@ -3,8 +3,13 @@
  *
  * The user picks an asset, selects whether they want to enter a USD spend
  * amount or a coin quantity, sees a live price estimate, then confirms.
- * On success it calls onSuccess() so the dashboard can refresh portfolio +
- * activity log immediately.
+ *
+ * ── Fire-and-forget UX ──────────────────────────────────────────────────────
+ * The backend responds as soon as it has validated inputs and confirmed the
+ * OKX connection (~300-500ms).  The actual OKX order runs in the background.
+ * This component treats that fast ack as success: it closes immediately and
+ * calls onSuccess() so the dashboard can add a pending entry to the Activity
+ * Log and speed up its poll interval.
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -49,6 +54,15 @@ function fmtCoin(n: number, asset: string): string {
   return `${n.toFixed(decimals).replace(/\.?0+$/, '')} ${asset}`;
 }
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+/** Passed to onSuccess so the dashboard can add an optimistic pending row. */
+export interface BuyPendingAction {
+  asset: string;
+  description: string;
+  submittedAt: number; // Date.now() at submission
+}
+
 // ─── Props ────────────────────────────────────────────────────────────────────
 
 interface BuySheetProps {
@@ -59,8 +73,9 @@ interface BuySheetProps {
   /** Assets already in the user's portfolio — shown first in the selector. */
   portfolioAssets: string[];
   userId: string;
-  /** Called after a successful purchase so the parent can refresh. */
-  onSuccess: () => void;
+  /** Called immediately after the server acks the order so the dashboard can
+   *  show a pending entry in the Activity Log. */
+  onSuccess: (pending: BuyPendingAction) => void;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -80,6 +95,7 @@ export function BuySheet({
     ...portfolioAssets,
     ...COMMON_ASSETS.filter((a) => !portfolioAssets.includes(a)),
   ];
+  void allAssets; // computed for selector ordering below
 
   const initialAsset = defaultAsset ?? portfolioAssets[0] ?? 'BTC';
 
@@ -164,7 +180,7 @@ export function BuySheet({
 
       const json = (await res.json()) as {
         ok?: boolean;
-        orderId?: string;
+        status?: string;
         error?: string;
       };
 
@@ -172,14 +188,30 @@ export function BuySheet({
         throw new Error(json.error ?? 'Unknown error');
       }
 
-      const description =
-        mode === 'spend' && estimatedCoins
-          ? `Bought ~${fmtCoin(estimatedCoins, asset)} for ${fmtUsd(numAmount)}`
-          : `Bought ${fmtCoin(numAmount, asset)} — order ${json.orderId}`;
+      // ── Fast ack received — close sheet and hand off to dashboard ─────────
+      //
+      // The server has validated the request and confirmed the OKX connection.
+      // The actual order is being placed in the background.  We close
+      // immediately and show a clear "check Activity Log" message so the user
+      // knows exactly where to see the result.
+      const description = summary
+        ? `${summary} — order submitted, processing in background`
+        : `${asset} order submitted — processing in background`;
 
-      toast({ title: '✅ Buy order placed', description });
       onOpenChange(false);
-      onSuccess(); // refresh portfolio + activity log
+
+      toast({
+        title: '✅ Order submitted',
+        description: 'Processing in background. Check Activity Log for the result.',
+      });
+
+      // Tell the dashboard to add a pending row + speed up its poll.
+      onSuccess({
+        asset,
+        description,
+        submittedAt: Date.now(),
+      });
+
     } catch (err: unknown) {
       const msg = (err as Error).message ?? 'Buy failed';
       toast({ variant: 'destructive', title: 'Buy failed', description: msg });
@@ -368,12 +400,18 @@ export function BuySheet({
             {submitting ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                Placing order…
+                Submitting…
               </>
             ) : (
               'Confirm Buy'
             )}
           </Button>
+
+          {/* ── Background-processing note ─────────────────────────────────── */}
+          <p className="text-center text-[11px] text-muted-foreground/50 leading-relaxed -mt-1">
+            Orders are submitted instantly. OKX may take a moment to fill —
+            check Activity Log for confirmation.
+          </p>
         </div>
       </SheetContent>
     </Sheet>

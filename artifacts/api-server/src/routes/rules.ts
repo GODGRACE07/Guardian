@@ -5,15 +5,19 @@
  * Bypasses cooldown and price-threshold checks — executes the exact same
  * trade/log code path as the automatic 60-second worker cycle.
  *
- * Body:  { userId: string }
- * Reply: { ok: true, action: string, reason: string, orderId?: string }
- *        or { error: string } on failure
+ * ── Two-phase design ──────────────────────────────────────────────────────────
+ * Phase 1 (fast, < 500ms): validate inputs + verify the rule + load the OKX
+ *   connection from Supabase.  If any step fails, return an error immediately.
+ *   If all succeed, respond at once with { ok: true, status: "processing" }.
  *
- * Error guarantee: the ENTIRE handler is wrapped in a single try/catch so
- * any throw — including Supabase network errors and OKX call failures — is
- * caught here and returned as a valid JSON error response. Combined with the
- * global error-handling middleware in app.ts this means a raw/empty response
- * can never reach the frontend.
+ * Phase 2 (background, can take minutes on OKX demo): call fireRule (which
+ *   places the OKX order or logs the alert).  Runs via setImmediate — after
+ *   the HTTP response is already sent.  The Activity Log auto-refresh will
+ *   surface the result naturally.
+ *
+ * Body:  { userId: string }
+ * Phase-1 reply: { ok: true, status: "processing" }
+ *               or { error: string } on failure
  */
 
 import { Router } from 'express';
@@ -30,16 +34,14 @@ router.post('/rules/:ruleId/test-trigger', async (req, res) => {
 
   logger.info({ ruleId, userId }, '[test-trigger] → received');
 
-  // ── Input validation (synchronous — no try/catch needed) ──────────────────
+  // ── Phase 1a: Input validation ─────────────────────────────────────────────
   if (!userId) {
     res.status(400).json({ error: 'userId is required' });
     return;
   }
 
-  // ── Everything else is async I/O — wrap entirely ──────────────────────────
+  // ── Phase 1b: Verify rule + load connection (Supabase, fast) ──────────────
   try {
-
-    // Step 1: verify the rule belongs to this user
     logger.info({ ruleId, userId }, '[test-trigger] step 1 — querying rule from Supabase');
     const { data: rule, error: ruleErr } = await supabase
       .from('rules')
@@ -54,7 +56,6 @@ router.post('/rules/:ruleId/test-trigger', async (req, res) => {
       return;
     }
 
-    // Step 2: load the user's active OKX connection
     logger.info({ ruleId, userId }, '[test-trigger] step 2 — querying OKX connection from Supabase');
     const { data: conn, error: connErr } = await supabase
       .from('okx_connections')
@@ -69,22 +70,40 @@ router.post('/rules/:ruleId/test-trigger', async (req, res) => {
       return;
     }
 
-    // Step 3: fire the rule (places OKX order or logs alert)
+    // ── Phase 1 complete — respond immediately ─────────────────────────────
+    const phase1Ms = Date.now() - t0;
     logger.info(
-      { ruleId, userId, ruleType: rule.rule_type, asset: rule.asset, isDemo: conn.is_demo },
-      '[test-trigger] step 3 — calling fireRule (OKX API call next)',
+      { ruleId, userId, ruleType: rule.rule_type, asset: rule.asset, phase1Ms },
+      '[test-trigger] ✅ phase 1 complete — sending ack, starting background phase',
     );
-    const result = await fireRule(conn as DbConnection, rule as DbRule);
+    res.json({ ok: true, status: 'processing' });
 
-    // Step 4: respond
-    const ms = Date.now() - t0;
-    logger.info({ ruleId, userId, result, ms }, '[test-trigger] ✅ complete — sending response');
-    res.json({ ok: true, ...result });
+    // ── Phase 2: fire rule (background, fire-and-forget) ──────────────────
+    setImmediate(async () => {
+      const t2 = Date.now();
+      try {
+        logger.info(
+          { ruleId, userId, ruleType: rule.rule_type, asset: rule.asset, isDemo: conn.is_demo },
+          '[test-trigger] phase 2 — calling fireRule (OKX API call next)',
+        );
+        const result = await fireRule(conn as DbConnection, rule as DbRule);
+        const ms = Date.now() - t2;
+        logger.info({ ruleId, userId, result, ms }, '[test-trigger] phase 2 ✅ complete');
+      } catch (err: unknown) {
+        const ms = Date.now() - t2;
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(
+          { ruleId, userId, err: msg, ms },
+          '[test-trigger] phase 2 ❌ background processing failed',
+        );
+      }
+    });
 
   } catch (err: unknown) {
+    // Phase 1 (Supabase lookup) failed
     const ms = Date.now() - t0;
     const msg = err instanceof Error ? err.message : String(err);
-    logger.error({ ruleId, userId, err: msg, ms }, '[test-trigger] ❌ unhandled error — sending JSON 500');
+    logger.error({ ruleId, userId, err: msg, ms }, '[test-trigger] ❌ phase 1 error — sending JSON 500');
     if (!res.headersSent) {
       res.status(500).json({ error: msg });
     }

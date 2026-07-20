@@ -13,6 +13,7 @@ import {
   ToggleRight,
   LogOut,
   FlaskConical,
+  CheckCircle2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
@@ -218,8 +219,12 @@ export default function RulesPage() {
   const [loadingRules, setLoadingRules] = useState(true);
 
   // ── Test Trigger state ──────────────────────────────────────────────────────
+  // confirmingTestId: which rule's confirmation panel is open
+  // submittingTestId: which rule is currently being submitted (shows spinner)
+  // submittedTestId:  which rule just got acked (shows checkmark before panel closes)
   const [confirmingTestId, setConfirmingTestId] = useState<string | null>(null);
-  const [testTriggering, setTestTriggering] = useState(false);
+  const [submittingTestId, setSubmittingTestId] = useState<string | null>(null);
+  const [submittedTestId, setSubmittedTestId] = useState<string | null>(null);
 
   // ── Add-rule form state ─────────────────────────────────────────────────────
   const [adding, setAdding] = useState(false);
@@ -235,8 +240,6 @@ export default function RulesPage() {
   const fetchRules = useCallback(async () => {
     if (!userId) return;
 
-    // Try to fetch with target_price first; fall back gracefully if the column
-    // doesn't exist yet (migration hasn't been run).
     let { data, error } = await supabase
       .from('rules')
       .select('id, rule_type, asset, threshold_pct, target_price, active')
@@ -244,7 +247,6 @@ export default function RulesPage() {
       .order('created_at', { ascending: false });
 
     if (error?.code === '42703') {
-      // Column doesn't exist yet — fetch without it and default to null
       const fallback = await supabase
         .from('rules')
         .select('id, rule_type, asset, threshold_pct, active')
@@ -269,7 +271,6 @@ export default function RulesPage() {
 
   // ── Toggle active ───────────────────────────────────────────────────────────
   const handleToggle = async (id: string, currentActive: boolean) => {
-    // Optimistic update
     setRules((prev) =>
       prev.map((r) => (r.id === id ? { ...r, active: !currentActive } : r)),
     );
@@ -279,7 +280,6 @@ export default function RulesPage() {
       .eq('id', id);
 
     if (error) {
-      // Roll back
       setRules((prev) =>
         prev.map((r) => (r.id === id ? { ...r, active: currentActive } : r)),
       );
@@ -293,7 +293,7 @@ export default function RulesPage() {
     const { error } = await supabase.from('rules').delete().eq('id', id);
     if (error) {
       toast({ variant: 'destructive', title: 'Delete failed', description: error.message });
-      fetchRules(); // re-sync
+      fetchRules();
     }
   };
 
@@ -329,7 +329,6 @@ export default function RulesPage() {
       return;
     }
 
-    // For price-target stop-loss, validate the price
     const isPriceMode = selectedType === 'stop_loss' && stopLossMode === 'price';
     const parsedPrice = isPriceMode ? parseFloat(targetPrice) : null;
     if (isPriceMode && (isNaN(parsedPrice!) || parsedPrice! <= 0)) {
@@ -342,7 +341,6 @@ export default function RulesPage() {
       user_id:       userId,
       rule_type:     selectedType,
       asset:         trimmedAsset,
-      // threshold_pct is 0 for price-target rules (column may be NOT NULL)
       threshold_pct: isPriceMode ? 0 : threshold,
       target_price:  parsedPrice ?? null,
       active:        true,
@@ -355,7 +353,6 @@ export default function RulesPage() {
       .single();
 
     if (error) {
-      // Graceful fallback if target_price column doesn't exist yet
       if (error.code === '42703' && error.message.includes('target_price')) {
         const { data: d2, error: e2 } = await supabase
           .from('rules')
@@ -380,33 +377,56 @@ export default function RulesPage() {
     setSaving(false);
   };
 
-  // ── Test Trigger ────────────────────────────────────────────────────────────
+  // ── Test Trigger ─────────────────────────────────────────────────────────────
+  //
+  // Fire-and-forget UX: send the request, get a fast ack from the server
+  // (~300-500ms — just a Supabase lookup), close the confirmation panel
+  // immediately, show a toast directing the user to the Activity Log.
+  // The actual OKX call continues in the background on the server.
   const handleTestTrigger = async (ruleId: string) => {
     if (!userId) return;
-    setTestTriggering(true);
+    setSubmittingTestId(ruleId);
     try {
       const res = await fetch(`/api/rules/${ruleId}/test-trigger`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId }),
       });
-      const json = await res.json() as { ok?: boolean; action?: string; reason?: string; tradeError?: string; error?: string };
-      if (!res.ok) throw new Error(json.error ?? 'Unknown error');
-      const description = json.tradeError
-        ? `Order failed: ${json.tradeError}`
-        : json.action ?? 'Rule executed';
-      toast({ title: '🧪 Test trigger fired', description });
-      setConfirmingTestId(null);
+      const json = await res.json() as {
+        ok?: boolean;
+        status?: string;
+        error?: string;
+      };
+      if (!res.ok || !json.ok) throw new Error(json.error ?? 'Unknown error');
+
+      // ── Fast ack received — give a brief "submitted" flash then close ──
+      setSubmittingTestId(null);
+      setSubmittedTestId(ruleId);
+
+      // Show submitted state briefly, then close the panel
+      setTimeout(() => {
+        setSubmittedTestId(null);
+        setConfirmingTestId(null);
+      }, 900);
+
+      toast({
+        title: '🧪 Test trigger submitted',
+        description: 'Processing in background — check Activity Log shortly for the result.',
+      });
+
     } catch (err: unknown) {
-      toast({ variant: 'destructive', title: 'Test trigger failed', description: (err as Error).message });
-    } finally {
-      setTestTriggering(false);
+      setSubmittingTestId(null);
+      toast({
+        variant: 'destructive',
+        title: 'Test trigger failed',
+        description: (err as Error).message,
+      });
     }
   };
 
   // ── Sign out ────────────────────────────────────────────────────────────────
   const handleSignOut = () => {
-    clearWalletSession(); // removes guardian_wallet_session from localStorage
+    clearWalletSession();
     setLocation('/auth');
   };
 
@@ -478,8 +498,8 @@ export default function RulesPage() {
                       This will immediately execute this rule's action for demo
                       purposes, ignoring current market conditions.{' '}
                       {rule.rule_type === 'stop_loss'
-                        ? 'A real market sell order will be placed via OKX (respecting demo/live mode).'
-                        : 'An alert entry will be written to your Activity Log.'}
+                        ? 'A real market sell order will be placed via OKX (respecting demo/live mode). OKX may take a moment to process — the result will appear in your Activity Log on the Dashboard.'
+                        : 'An alert entry will be written to your Activity Log on the Dashboard.'}
                     </p>
 
                     {/* Buttons */}
@@ -488,7 +508,7 @@ export default function RulesPage() {
                         size="sm"
                         variant="outline"
                         onClick={() => setConfirmingTestId(null)}
-                        disabled={testTriggering}
+                        disabled={submittingTestId === rule.id || submittedTestId === rule.id}
                         className="flex-1 text-xs border-amber-500/30 text-amber-400/70 hover:text-amber-400 hover:bg-amber-500/5"
                       >
                         Cancel
@@ -496,13 +516,30 @@ export default function RulesPage() {
                       <Button
                         size="sm"
                         onClick={() => handleTestTrigger(rule.id)}
-                        disabled={testTriggering}
-                        className="flex-1 text-xs bg-amber-500 hover:bg-amber-400 text-black font-semibold gap-1.5"
+                        disabled={submittingTestId === rule.id || submittedTestId === rule.id}
+                        className={[
+                          'flex-1 text-xs font-semibold gap-1.5 transition-colors',
+                          submittedTestId === rule.id
+                            ? 'bg-green-500 hover:bg-green-500 text-white'
+                            : 'bg-amber-500 hover:bg-amber-400 text-black',
+                        ].join(' ')}
                       >
-                        {testTriggering
-                          ? <Loader2 className="w-3 h-3 animate-spin" />
-                          : <FlaskConical className="w-3 h-3" />}
-                        {testTriggering ? 'Triggering…' : 'Confirm'}
+                        {submittingTestId === rule.id ? (
+                          <>
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            Submitting…
+                          </>
+                        ) : submittedTestId === rule.id ? (
+                          <>
+                            <CheckCircle2 className="w-3 h-3" />
+                            Submitted!
+                          </>
+                        ) : (
+                          <>
+                            <FlaskConical className="w-3 h-3" />
+                            Confirm
+                          </>
+                        )}
                       </Button>
                     </div>
                   </div>

@@ -9,6 +9,7 @@ import {
   Zap,
   LogOut,
   TrendingUp,
+  Clock,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
@@ -16,7 +17,7 @@ import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
 import { fetchPortfolio, type PortfolioData, type OkxConnection } from '@/lib/okx';
 import { BottomNav } from '@/components/BottomNav';
-import { BuySheet } from '@/components/BuySheet';
+import { BuySheet, type BuyPendingAction } from '@/components/BuySheet';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -30,11 +31,35 @@ interface TradeLogEntry {
   [key: string]: unknown;
 }
 
+/**
+ * A locally-synthesised entry that represents an action that has been
+ * submitted to the server but hasn't yet appeared in trade_log.
+ * Shown at the top of the Activity Log with a pulsing indicator until the
+ * real entry arrives (or until the expiry timeout is reached).
+ */
+interface PendingEntry {
+  /** client-side unique id — never matches a real trade_log id */
+  id: string;
+  asset: string;
+  description: string;
+  /** Date.now() at submission — used to match against real entries */
+  submittedAt: number;
+}
+
 type PortfolioState =
   | { status: 'loading' }
   | { status: 'error'; message: string }
   | { status: 'no-connection' }
   | { status: 'ok'; data: PortfolioData; isDemo: boolean };
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+/** Normal poll interval when nothing is pending */
+const REFRESH_INTERVAL_MS = 30_000;
+/** Faster poll while a pending entry is waiting to be confirmed */
+const PENDING_REFRESH_INTERVAL_MS = 5_000;
+/** Remove a pending entry if the real log entry still hasn't appeared after this long */
+const PENDING_EXPIRY_MS = 5 * 60_000; // 5 minutes
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -48,8 +73,6 @@ function relativeTime(iso?: string): string {
 }
 
 function fmtUsd(n: number): string {
-  // Full exact dollar amount with comma separators and two decimal places.
-  // e.g. $64,220.45 — never abbreviated like $64.22K
   return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
@@ -61,9 +84,12 @@ function fmtBal(n: number): string {
   return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
+let pendingIdCounter = 0;
+function newPendingId() {
+  return `pending-${Date.now()}-${++pendingIdCounter}`;
+}
+
 // ─── Coin icon ────────────────────────────────────────────────────────────────
-// Uses CoinCap's public CDN — no API key required, keyed by lowercase symbol.
-// Falls back to a lettered placeholder if the icon URL 404s.
 
 function CoinIcon({ symbol }: { symbol: string }) {
   const [failed, setFailed] = useState(false);
@@ -201,10 +227,8 @@ function PortfolioSection({
         <ul className="divide-y divide-card-border/40">
           {data.assets.map((a) => (
             <li key={a.symbol} className="px-5 py-3 flex items-center gap-3">
-              {/* Coin icon — real logo from CoinCap CDN, lettered fallback */}
               <CoinIcon symbol={a.symbol} />
 
-              {/* Symbol + exact amount held */}
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-foreground">{a.symbol}</p>
                 <p className="text-xs text-muted-foreground tabular-nums">
@@ -212,7 +236,6 @@ function PortfolioSection({
                 </p>
               </div>
 
-              {/* USD value + % bar */}
               <div className="text-right shrink-0 space-y-1">
                 <p className="text-sm font-medium text-foreground tabular-nums">
                   {fmtUsd(a.usdValue)}
@@ -262,20 +285,33 @@ function ActiveRulesRow({ count }: { count: number | null }) {
 
 function ActivityLog({
   entries,
+  pendingEntries,
   loading,
   lastRefreshed,
   onRefresh,
 }: {
   entries: TradeLogEntry[];
+  pendingEntries: PendingEntry[];
   loading: boolean;
   lastRefreshed: Date | null;
   onRefresh: () => void;
 }) {
+  const isEmpty = entries.length === 0 && pendingEntries.length === 0;
+
   return (
     <div className="space-y-3">
       {/* Section header */}
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-foreground">Activity Log</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-foreground">Activity Log</h2>
+          {/* Subtle "live" indicator when we have pending entries */}
+          {pendingEntries.length > 0 && (
+            <span className="flex items-center gap-1 text-[10px] font-medium text-amber-400/80 bg-amber-500/10 border border-amber-500/20 px-1.5 py-0.5 rounded-full">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+              Processing
+            </span>
+          )}
+        </div>
         <button
           onClick={onRefresh}
           disabled={loading}
@@ -287,13 +323,12 @@ function ActivityLog({
         </button>
       </div>
 
-      {loading && entries.length === 0 ? (
+      {loading && isEmpty ? (
         <div className="rounded-2xl border border-card-border bg-card p-6 flex items-center justify-center gap-2 text-muted-foreground">
           <Loader2 className="w-4 h-4 animate-spin" />
           <span className="text-sm">Loading activity…</span>
         </div>
-      ) : entries.length === 0 ? (
-        // Empty state
+      ) : isEmpty ? (
         <div className="rounded-2xl border border-dashed border-card-border bg-card/50 p-8 flex flex-col items-center text-center gap-3">
           <div className="w-12 h-12 rounded-2xl bg-primary/10 flex items-center justify-center">
             <ShieldCheck className="w-6 h-6 text-primary/60" />
@@ -307,8 +342,38 @@ function ActivityLog({
         </div>
       ) : (
         <div className="rounded-2xl border border-card-border bg-card divide-y divide-card-border/40 overflow-hidden">
+
+          {/* ── Pending rows at the top ─────────────────────────────────── */}
+          {pendingEntries.map((p) => (
+            <div key={p.id} className="px-4 py-3 flex gap-3 items-start bg-amber-500/5">
+              {/* Pulsing amber icon to distinguish from confirmed entries */}
+              <div className="mt-0.5 w-7 h-7 rounded-lg bg-amber-500/15 flex items-center justify-center shrink-0">
+                <Clock className="w-3.5 h-3.5 text-amber-400" />
+              </div>
+              <div className="flex-1 min-w-0 space-y-0.5">
+                <div className="flex items-baseline gap-2 flex-wrap">
+                  <p className="text-sm font-medium text-foreground/80">
+                    {p.asset ? `Buying ${p.asset}` : 'Order submitted'}
+                  </p>
+                  {p.asset && (
+                    <span className="text-xs font-semibold text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded">
+                      {p.asset}
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Submitted — waiting for OKX confirmation
+                </p>
+              </div>
+              <span className="text-[10px] text-amber-400/60 shrink-0 mt-0.5 flex items-center gap-1">
+                <span className="w-1 h-1 rounded-full bg-amber-400/60 animate-pulse inline-block" />
+                Processing…
+              </span>
+            </div>
+          ))}
+
+          {/* ── Confirmed log entries ───────────────────────────────────── */}
           {entries.map((entry) => {
-            // trade_log columns: id, user_id, action_taken, asset, reason, details, created_at
             const action = String(entry.action_taken ?? entry.action ?? 'Action');
             const asset  = String(entry.asset ?? '—');
             const reason = String(entry.reason ?? '');
@@ -358,15 +423,13 @@ function ActivityLog({
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 
-const REFRESH_INTERVAL_MS = 30_000;
-
 export default function DashboardPage() {
   const { userId, clearWalletSession } = useAuth();
   const [, setLocation] = useLocation();
   const { toast } = useToast();
 
   const handleSignOut = () => {
-    clearWalletSession(); // removes guardian_wallet_session from localStorage
+    clearWalletSession();
     setLocation('/auth');
   };
 
@@ -376,9 +439,10 @@ export default function DashboardPage() {
   const [logLoading, setLogLoading] = useState(true);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
 
-  // Signing credentials for live OKX requests
-  const connRef = useRef<OkxConnection | null>(null);
-  // Supabase row id — stored separately so we can deactivate the row on disconnect
+  /** Optimistic pending entries — submitted but not yet confirmed in trade_log */
+  const [pendingEntries, setPendingEntries] = useState<PendingEntry[]>([]);
+
+  const connRef   = useRef<OkxConnection | null>(null);
   const connIdRef = useRef<string | null>(null);
 
   // ── Buy sheet state ────────────────────────────────────────────────────────
@@ -400,8 +464,6 @@ export default function DashboardPage() {
     const { error } = await supabase
       .from('okx_connections')
       .update({ active: false })
-      // Match by id so we never accidentally deactivate a connection belonging
-      // to a different user or a row that was already replaced.
       .eq('id', connIdRef.current);
 
     if (error) {
@@ -411,7 +473,6 @@ export default function DashboardPage() {
       return;
     }
 
-    // Session stays active — only the OKX link is removed.
     setLocation('/connect-okx');
   };
 
@@ -431,17 +492,12 @@ export default function DashboardPage() {
     if (!userId) return;
     const { data: conn, error: connError } = await supabase
       .from('okx_connections')
-      // Fetch id alongside credentials so we can deactivate the row later
       .select('id, api_key, api_secret, api_passphrase, is_demo')
       .eq('user_id', userId)
       .eq('active', true)
       .maybeSingle();
 
     if (connError) {
-      // PGRST116 means multiple rows matched — this happens when a previous
-      // connect attempt left behind a duplicate active row. Treat it as an
-      // error with a clear message rather than silently showing "no connection".
-      console.error('[Dashboard] initPortfolio maybeSingle error:', connError);
       setPortfolioState({
         status: 'error',
         message: connError.code === 'PGRST116'
@@ -467,9 +523,6 @@ export default function DashboardPage() {
   }, [userId, loadPortfolio]);
 
   // ── Load active rule count ─────────────────────────────────────────────────
-  // Note: { count: 'exact', head: true } makes a HEAD request whose Content-Range
-  // header returns null when there is no Supabase Auth session (our wallet auth
-  // bypasses Supabase Auth). Fetching the actual IDs and counting them is reliable.
   const loadRuleCount = useCallback(async () => {
     if (!userId) return;
     const { data } = await supabase
@@ -484,6 +537,7 @@ export default function DashboardPage() {
   const loadLog = useCallback(async (showSpinner = false) => {
     if (!userId) return;
     if (showSpinner) setLogLoading(true);
+
     const { data, error } = await supabase
       .from('trade_log')
       .select('*')
@@ -491,19 +545,42 @@ export default function DashboardPage() {
       .order('created_at', { ascending: false })
       .limit(50);
 
+    let fresh: TradeLogEntry[];
     if (error) {
-      // trade_log may not have created_at — try without ordering
       const { data: fallback } = await supabase
         .from('trade_log')
         .select('*')
         .eq('user_id', userId)
         .limit(50);
-      setLogEntries((fallback as TradeLogEntry[]) ?? []);
+      fresh = (fallback as TradeLogEntry[]) ?? [];
     } else {
-      setLogEntries((data as TradeLogEntry[]) ?? []);
+      fresh = (data as TradeLogEntry[]) ?? [];
     }
+
+    setLogEntries(fresh);
     setLastRefreshed(new Date());
     setLogLoading(false);
+
+    // ── Reconcile pending entries ──────────────────────────────────────────
+    // Remove any pending entry that either:
+    //   (a) has a matching real entry (same asset, created_at >= submittedAt), or
+    //   (b) has expired (> PENDING_EXPIRY_MS old)
+    setPendingEntries((prev) => {
+      if (prev.length === 0) return prev;
+      const now = Date.now();
+      return prev.filter((p) => {
+        // Expire after timeout regardless
+        if (now - p.submittedAt > PENDING_EXPIRY_MS) return false;
+
+        // Clear if a real entry with this asset appeared after submission
+        const fulfilled = fresh.some((e) => {
+          if (!e.asset || e.asset !== p.asset) return false;
+          if (!e.created_at) return false;
+          return new Date(e.created_at).getTime() >= p.submittedAt;
+        });
+        return !fulfilled;
+      });
+    });
   }, [userId]);
 
   // ── Initial load ───────────────────────────────────────────────────────────
@@ -514,11 +591,14 @@ export default function DashboardPage() {
     loadLog(true);
   }, [userId, initPortfolio, loadRuleCount, loadLog]);
 
-  // ── Auto-refresh log every 30s ─────────────────────────────────────────────
+  // ── Auto-refresh log — faster when there are pending entries ──────────────
   useEffect(() => {
-    const interval = setInterval(() => loadLog(false), REFRESH_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [loadLog]);
+    const interval = pendingEntries.length > 0
+      ? PENDING_REFRESH_INTERVAL_MS
+      : REFRESH_INTERVAL_MS;
+    const id = setInterval(() => loadLog(false), interval);
+    return () => clearInterval(id);
+  }, [loadLog, pendingEntries.length]);
 
   // ── Refresh on tab focus ───────────────────────────────────────────────────
   useEffect(() => {
@@ -532,6 +612,20 @@ export default function DashboardPage() {
     loadLog(true);
     if (connRef.current) loadPortfolio(connRef.current);
     loadRuleCount();
+  };
+
+  // ── Handle buy submission ack ──────────────────────────────────────────────
+  //
+  // Called by BuySheet immediately after the server acks the request (~300ms).
+  // We add a pending entry so the user sees immediate feedback, and the faster
+  // poll interval kicks in automatically (pendingEntries.length > 0).
+  const handleBuySuccess = (pending: BuyPendingAction) => {
+    setPendingEntries((prev) => [
+      ...prev,
+      { id: newPendingId(), ...pending },
+    ]);
+    // Trigger one immediate silent refresh so the log is as fresh as possible
+    loadLog(false);
   };
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -563,7 +657,7 @@ export default function DashboardPage() {
           onSwitchAccount={() => setShowDisconnectConfirm(true)}
         />
 
-        {/* ── Disconnect confirmation card ────────────────────────────────── */}
+        {/* ── Disconnect confirmation card ─────────────────────────────── */}
         {showDisconnectConfirm && (
           <div className="rounded-2xl border border-[#f59e0b]/30 bg-[#451a03]/60 p-5 space-y-4">
             <div className="space-y-1">
@@ -619,6 +713,7 @@ export default function DashboardPage() {
         {/* Activity log */}
         <ActivityLog
           entries={logEntries}
+          pendingEntries={pendingEntries}
           loading={logLoading}
           lastRefreshed={lastRefreshed}
           onRefresh={handleLogRefresh}
@@ -636,9 +731,7 @@ export default function DashboardPage() {
             : []
         }
         userId={userId ?? ''}
-        onSuccess={() => {
-          handleLogRefresh();
-        }}
+        onSuccess={handleBuySuccess}
       />
 
       <BottomNav />

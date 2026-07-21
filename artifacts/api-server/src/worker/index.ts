@@ -212,8 +212,6 @@ async function processUser(conn: DbConnection, rules: DbRule[]): Promise<UserCyc
       continue;
     }
 
-    result.rulesTriggered++;
-
     // ── Stop-loss: place a real trade ─────────────────────────────────────
     if (rule.rule_type === 'stop_loss') {
       if (isOnCooldown(rule.id, SELL_COOLDOWN_MS)) {
@@ -226,6 +224,21 @@ async function processUser(conn: DbConnection, rules: DbRule[]): Promise<UserCyc
         result.errors.push(`stop_loss: ${rule.asset} has no sellable balance`);
         continue;
       }
+
+      // OKX rejects orders below ~$1 USDT. Skip dust positions silently so
+      // server restarts (which reset in-memory cooldowns) don't flood the log
+      // with guaranteed OKX failures on leftover dust after a successful sell.
+      if (assetData.usdValue < 1) {
+        logger.debug(
+          { ruleId: rule.id, asset: rule.asset, usdValue: assetData.usdValue },
+          '[worker] stop_loss skipped — dust position below $1 OKX minimum, marking on cooldown',
+        );
+        markFired(rule.id); // re-arm cooldown so we don't spam on next restart
+        continue;
+      }
+
+      // Only count as triggered once we've confirmed we'll actually act
+      result.rulesTriggered++;
 
       let orderId = '(dry-run)';
       let tradeError: string | null = null;
@@ -271,7 +284,6 @@ async function processUser(conn: DbConnection, rules: DbRule[]): Promise<UserCyc
         amount:  assetData.balance.toString(),
       });
 
-      result.alertsLogged++;
       markFired(rule.id);
     }
 
@@ -281,6 +293,9 @@ async function processUser(conn: DbConnection, rules: DbRule[]): Promise<UserCyc
         logger.debug({ ruleId: rule.id }, '[worker] alert on 1h cooldown — skipping');
         continue;
       }
+
+      // Only count as triggered once we've confirmed we'll actually act
+      result.rulesTriggered++;
 
       await logTradeEntry({
         user_id: conn.user_id,

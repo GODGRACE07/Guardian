@@ -97,6 +97,14 @@ export async function fireRule(
       throw new Error(`${rule.asset} has no sellable balance in this portfolio`);
     }
 
+    // OKX rejects orders below ~$1 USDT. Surface this as a clear error
+    // rather than letting the OKX call fail with a cryptic "All operations failed".
+    if (assetData.usdValue < 1) {
+      throw new Error(
+        `${rule.asset} position is dust (${assetData.usdValue.toFixed(6)}) — below OKX $1 minimum order value`,
+      );
+    }
+
     const currentPrice = assetData.usdValue / assetData.balance;
     const baseReason = rule.target_price != null && rule.target_price > 0
       ? `Manual test trigger: ${rule.asset} price ${currentPrice.toFixed(4)} (target ${rule.target_price.toFixed(4)}) — forced via Test Trigger`

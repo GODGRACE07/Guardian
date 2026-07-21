@@ -214,6 +214,19 @@ async function processUser(conn: DbConnection, rules: DbRule[]): Promise<UserCyc
 
     // ── Stop-loss: place a real trade ─────────────────────────────────────
     if (rule.rule_type === 'stop_loss') {
+      // USDT is the quote currency for every OKX spot pair (e.g. BTC-USDT).
+      // Attempting to sell USDT constructs the pair "USDT-USDT" which does not
+      // exist on OKX — the order is always rejected. Skip these rules early and
+      // put them on a long cooldown so they don't flood the Activity Log.
+      if (rule.asset === 'USDT') {
+        logger.warn(
+          { ruleId: rule.id, asset: rule.asset, targetPrice: rule.target_price },
+          '[worker] stop_loss skipped — USDT is the quote currency and cannot be sold via OKX spot pairs; delete or re-assign this rule',
+        );
+        markFired(rule.id);
+        continue;
+      }
+
       if (isOnCooldown(rule.id, SELL_COOLDOWN_MS)) {
         logger.debug({ ruleId: rule.id }, '[worker] stop_loss on 24h cooldown after sell — skipping');
         continue;

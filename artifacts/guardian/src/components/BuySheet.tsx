@@ -178,11 +178,17 @@ export function BuySheet({
         }),
       });
 
-      const json = (await res.json()) as {
-        ok?: boolean;
-        status?: string;
-        error?: string;
-      };
+      // Parse defensively — an empty body (e.g. server down, proxy 502) throws
+      // "Unexpected end of JSON input" if we call res.json() unconditionally.
+      let json: { ok?: boolean; status?: string; error?: string };
+      try {
+        json = (await res.json()) as typeof json;
+      } catch {
+        throw new Error(
+          `Server returned HTTP ${res.status} with no parseable body. ` +
+          `Is the API server running?`,
+        );
+      }
 
       if (!res.ok || !json.ok) {
         throw new Error(json.error ?? 'Unknown error');

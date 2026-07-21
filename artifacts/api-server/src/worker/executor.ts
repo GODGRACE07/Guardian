@@ -92,6 +92,16 @@ export async function fireRule(
 
   // ── Stop-loss: place a real market sell ────────────────────────────────────
   if (rule.rule_type === 'stop_loss') {
+    // USDT is the quote currency for every OKX spot pair (e.g. BTC-USDT).
+    // placeMarketSell would construct "USDT-USDT" which OKX always rejects.
+    // Throw early with a clear message rather than surfacing a cryptic OKX error.
+    if (rule.asset === 'USDT') {
+      throw new Error(
+        'Stop-loss rule targets USDT, which is the quote currency — ' +
+        'OKX does not have a USDT-USDT spot pair. Delete this rule and create one for a non-stablecoin asset.',
+      );
+    }
+
     const assetData = portfolio.assets.find((a) => a.symbol === rule.asset);
     if (!assetData || assetData.balance <= 0) {
       throw new Error(`${rule.asset} has no sellable balance in this portfolio`);

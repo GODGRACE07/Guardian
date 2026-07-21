@@ -165,8 +165,13 @@ export function BuySheet({
     if (!numAmount || numAmount <= 0) return;
     setSubmitting(true);
 
+    // Use VITE_API_BASE_URL when the frontend is deployed to a static host
+    // (e.g. Vercel) and the API server lives at a separate origin. Leave it
+    // unset for Replit deployments where path-based routing handles /api/*.
+    const apiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '';
+
     try {
-      const res = await fetch('/api/trade/buy', {
+      const res = await fetch(`${apiBase}/api/trade/buy`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

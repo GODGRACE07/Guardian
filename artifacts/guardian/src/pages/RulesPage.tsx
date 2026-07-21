@@ -101,6 +101,15 @@ const RULE_TYPE_ORDER: RuleType[] = [
   'rebalance_alert',
 ];
 
+// ─── API base URL ────────────────────────────────────────────────────────────
+//
+// When the frontend is deployed to a static host (e.g. Vercel) and the API
+// server lives at a separate URL, set VITE_API_BASE_URL to the full origin of
+// the API server (e.g. "https://guardian-api.replit.app"). Leave it unset (or
+// empty) for Replit's dev/production deployments where the path-based proxy
+// routes /api/* to the API server automatically.
+const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '';
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 /** Human-readable description of a rule, handling both stop-loss modes. */
@@ -247,16 +256,19 @@ export default function RulesPage() {
       .order('created_at', { ascending: false });
 
     if (error?.code === '42703') {
+      // target_price column doesn't exist in this DB — fetch without it and
+      // synthesize the field so the rest of the code sees a consistent shape.
       const fallback = await supabase
         .from('rules')
         .select('id, rule_type, asset, threshold_pct, active')
         .eq('user_id', userId)
         .order('created_at', { ascending: false });
-      data = fallback.data;
       error = fallback.error;
-      if (!error && data) {
-        data = (data as Omit<Rule, 'target_price'>[]).map((r) => ({ ...r, target_price: null })) as Rule[];
-      }
+      data = fallback.error
+        ? null
+        : ((fallback.data ?? []) as Omit<Rule, 'target_price'>[]).map(
+            (r) => ({ ...r, target_price: null }) as Rule,
+          );
     }
 
     if (error) {
@@ -387,7 +399,7 @@ export default function RulesPage() {
     if (!userId) return;
     setSubmittingTestId(ruleId);
     try {
-      const res = await fetch(`/api/rules/${ruleId}/test-trigger`, {
+      const res = await fetch(`${API_BASE}/api/rules/${ruleId}/test-trigger`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId }),

@@ -3,5 +3,18 @@
   "outputDirectory": "dist/public",
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }
+  ],
+  "notes": [
+    "When deploying this frontend to Vercel (standalone, without Replit's path proxy),",
+    "POST requests to /api/* will get 405 from this static site because the catch-all",
+    "rewrite serves index.html for every path, and Vercel's static server rejects non-GET.",
+    "",
+    "Fix: set VITE_API_BASE_URL in your Vercel project environment variables to the full",
+    "origin of your deployed Guardian API server (e.g. https://guardian-api.replit.app).",
+    "The frontend fetch calls read this variable and prefix all /api/* calls with it.",
+    "",
+    "On Replit's own deployment (recommended), both services deploy together and Replit's",
+    "path-based proxy routes /api/* to the API server automatically — VITE_API_BASE_URL",
+    "should be left empty or unset in that case."
   ]
 }

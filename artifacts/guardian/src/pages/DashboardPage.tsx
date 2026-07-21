@@ -78,7 +78,9 @@ function fmtUsd(n: number): string {
 
 function fmtBal(n: number): string {
   if (n === 0) return '0';
-  if (n < 0.0001) return n.toExponential(2);
+  // Use toFixed(8) for tiny values so "2.79e-7" displays as "0.00000028"
+  // instead of raw scientific notation, which confuses users.
+  if (n < 0.0001) return n.toFixed(8).replace(/\.?0+$/, '') || '0';
   if (n < 1) return n.toPrecision(4);
   if (n < 1000) return n.toFixed(4).replace(/\.?0+$/, '');
   return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -525,12 +527,20 @@ export default function DashboardPage() {
   // ── Load active rule count ─────────────────────────────────────────────────
   const loadRuleCount = useCallback(async () => {
     if (!userId) return;
-    const { data } = await supabase
+    // Use count: 'exact' + head: true so Supabase returns just the count
+    // without fetching row data — faster and lighter on the network.
+    const { count, error } = await supabase
       .from('rules')
-      .select('id')
+      .select('*', { count: 'exact', head: true })
       .eq('user_id', userId)
       .eq('active', true);
-    setActiveRuleCount(data?.length ?? 0);
+    if (error) {
+      // Log so Replit's console surfaces the underlying cause (e.g. RLS
+      // policy blocking access, or a column name mismatch).
+      console.error('[dashboard] loadRuleCount error:', error.message, error.code);
+      return; // leave the count as-is rather than zeroing it on error
+    }
+    setActiveRuleCount(count ?? 0);
   }, [userId]);
 
   // ── Load activity log ──────────────────────────────────────────────────────

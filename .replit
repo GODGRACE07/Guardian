@@ -26,6 +26,7 @@ VITE_SUPABASE_URL = "https://dutbwqdithjcyfdzdwnl.supabase.co"
 
 [nix]
 channel = "stable-25_05"
+packages = ["q"]
 
 [[ports]]
 localPort = 8080

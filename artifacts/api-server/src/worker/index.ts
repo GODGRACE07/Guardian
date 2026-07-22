@@ -25,6 +25,29 @@ import { supabase } from './supabase.js';
 import { fetchPortfolio, placeMarketSell, type OkxConnection } from './okx.js';
 import { logTradeEntry, type DbConnection, type DbRule } from './executor.js';
 
+// ─── Worker cycle status (exported for /api/status route) ─────────────────────
+
+export interface WorkerCycleStatus {
+  lastCycleAt: string | null;   // ISO timestamp of the most recent completed cycle
+  lastCycleDurationMs: number;
+  usersMonitored: number;
+  rulesChecked: number;
+  triggered: number;
+}
+
+const _cycleStatus: WorkerCycleStatus = {
+  lastCycleAt: null,
+  lastCycleDurationMs: 0,
+  usersMonitored: 0,
+  rulesChecked: 0,
+  triggered: 0,
+};
+
+/** Returns a snapshot of the most recent worker cycle stats. */
+export function getWorkerStatus(): WorkerCycleStatus {
+  return { ..._cycleStatus };
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const CYCLE_MS             = 60_000;   // how often the worker runs
@@ -414,6 +437,13 @@ async function runCycle(): Promise<void> {
     `${totalRulesTriggered} triggered (${totalTradesExecuted} trade(s), ${totalAlertsLogged} alert(s)), ` +
     `${totalErrors} error(s) — ${elapsed}ms`,
   );
+
+  // 5. Update exported status so /api/status reflects the latest cycle
+  _cycleStatus.lastCycleAt        = new Date().toISOString();
+  _cycleStatus.lastCycleDurationMs = elapsed;
+  _cycleStatus.usersMonitored     = connections.length;
+  _cycleStatus.rulesChecked       = totalRulesChecked;
+  _cycleStatus.triggered          = totalRulesTriggered;
 }
 
 // ─── Start ────────────────────────────────────────────────────────────────────

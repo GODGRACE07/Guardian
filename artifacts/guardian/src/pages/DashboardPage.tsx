@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Link, useLocation } from 'wouter';
 import {
   ShieldCheck,
@@ -9,13 +9,16 @@ import {
   Zap,
   LogOut,
   TrendingUp,
+  TrendingDown,
   Clock,
+  Bell,
+  Shield,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
-import { fetchPortfolio, type PortfolioData, type OkxConnection } from '@/lib/okx';
+import { fetchPortfolio, fetchTicker, type PortfolioData, type OkxConnection } from '@/lib/okx';
 import { BottomNav } from '@/components/BottomNav';
 import { BuySheet, type BuyPendingAction } from '@/components/BuySheet';
 
@@ -23,26 +26,18 @@ import { BuySheet, type BuyPendingAction } from '@/components/BuySheet';
 
 interface TradeLogEntry {
   id: string;
-  action_taken?: string;  // NOT NULL column — the action label
+  action_taken?: string;
   asset?: string;
   reason?: string;
-  details?: string | null; // nullable — holds "amount: X" or orderId info
+  details?: string | null;
   created_at?: string;
   [key: string]: unknown;
 }
 
-/**
- * A locally-synthesised entry that represents an action that has been
- * submitted to the server but hasn't yet appeared in trade_log.
- * Shown at the top of the Activity Log with a pulsing indicator until the
- * real entry arrives (or until the expiry timeout is reached).
- */
 interface PendingEntry {
-  /** client-side unique id — never matches a real trade_log id */
   id: string;
   asset: string;
   description: string;
-  /** Date.now() at submission — used to match against real entries */
   submittedAt: number;
 }
 
@@ -52,14 +47,65 @@ type PortfolioState =
   | { status: 'no-connection' }
   | { status: 'ok'; data: PortfolioData; isDemo: boolean };
 
+interface WorkerCycleStatus {
+  lastCycleAt: string | null;
+  lastCycleDurationMs: number;
+  usersMonitored: number;
+  rulesChecked: number;
+  triggered: number;
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-/** Normal poll interval when nothing is pending */
-const REFRESH_INTERVAL_MS = 30_000;
-/** Faster poll while a pending entry is waiting to be confirmed */
+const REFRESH_INTERVAL_MS         = 30_000;
 const PENDING_REFRESH_INTERVAL_MS = 5_000;
-/** Remove a pending entry if the real log entry still hasn't appeared after this long */
-const PENDING_EXPIRY_MS = 5 * 60_000; // 5 minutes
+const PENDING_EXPIRY_MS           = 5 * 60_000;
+
+// ─── Asset accent palette ─────────────────────────────────────────────────────
+
+const ASSET_COLORS: Record<string, string> = {
+  BTC:   '#fb923c',
+  ETH:   '#818cf8',
+  SOL:   '#22d3ee',
+  BNB:   '#fbbf24',
+  XRP:   '#60a5fa',
+  ADA:   '#c084fc',
+  DOGE:  '#fcd34d',
+  USDT:  '#34d399',
+  USDC:  '#34d399',
+  TUSD:  '#34d399',
+  BUSD:  '#34d399',
+  MATIC: '#a855f7',
+  AVAX:  '#f87171',
+  LINK:  '#3b82f6',
+  DOT:   '#e879f9',
+  LTC:   '#94a3b8',
+  UNI:   '#f472b6',
+  ATOM:  '#6366f1',
+  NEAR:  '#4ade80',
+  FIL:   '#0ea5e9',
+  AAVE:  '#a78bfa',
+  MKR:   '#14b8a6',
+  ARB:   '#60a5fa',
+  OP:    '#f87171',
+  SUI:   '#38bdf8',
+  APT:   '#818cf8',
+  INJ:   '#fb7185',
+  TRX:   '#ef4444',
+};
+
+const FALLBACK_COLORS = [
+  '#60a5fa', '#f472b6', '#34d399', '#fbbf24',
+  '#a78bfa', '#22d3ee', '#fb923c', '#818cf8',
+];
+
+function getAssetColor(symbol: string): string {
+  if (ASSET_COLORS[symbol]) return ASSET_COLORS[symbol];
+  const hash = symbol.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
+  return FALLBACK_COLORS[hash % FALLBACK_COLORS.length];
+}
+
+const STABLECOINS = new Set(['USDT', 'USDC', 'TUSD', 'BUSD', 'DAI', 'FRAX', 'USDP']);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -78,12 +124,19 @@ function fmtUsd(n: number): string {
 
 function fmtBal(n: number): string {
   if (n === 0) return '0';
-  // Use toFixed(8) for tiny values so "2.79e-7" displays as "0.00000028"
-  // instead of raw scientific notation, which confuses users.
   if (n < 0.0001) return n.toFixed(8).replace(/\.?0+$/, '') || '0';
   if (n < 1) return n.toPrecision(4);
   if (n < 1000) return n.toFixed(4).replace(/\.?0+$/, '');
   return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function fmtPrice(n: number): string {
+  if (n >= 10_000) return `$${n.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+  if (n >= 1_000)  return `$${n.toLocaleString('en-US', { maximumFractionDigits: 1 })}`;
+  if (n >= 100)    return `$${n.toFixed(2)}`;
+  if (n >= 1)      return `$${n.toFixed(3)}`;
+  if (n >= 0.01)   return `$${n.toFixed(4)}`;
+  return `$${n.toFixed(6)}`;
 }
 
 let pendingIdCounter = 0;
@@ -91,17 +144,85 @@ function newPendingId() {
   return `pending-${Date.now()}-${++pendingIdCounter}`;
 }
 
+// ─── Hooks ────────────────────────────────────────────────────────────────────
+
+/** Fetches live spot prices for all portfolio symbols from OKX's public ticker. */
+function useLivePrices(symbols: string[]) {
+  const [prices, setPrices] = useState<Record<string, number>>({});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const symbolsKey = symbols.join(',');
+
+  useEffect(() => {
+    if (!symbolsKey) return;
+    let cancelled = false;
+
+    const fetchAll = async () => {
+      const results = await Promise.allSettled(
+        symbols.map(async (sym): Promise<[string, number]> => {
+          if (STABLECOINS.has(sym)) return [sym, 1];
+          const { last } = await fetchTicker(sym);
+          return [sym, last];
+        }),
+      );
+      if (cancelled) return;
+      const map: Record<string, number> = {};
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          const [sym, price] = r.value;
+          map[sym] = price;
+        }
+      }
+      setPrices((prev) => ({ ...prev, ...map }));
+    };
+
+    fetchAll();
+    const id = setInterval(fetchAll, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+    // symbolsKey is the stable dep — symbols itself changes reference every render
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbolsKey]);
+
+  return prices;
+}
+
+/** Polls /api/status every 30s for worker cycle info. */
+function useWorkerStatus() {
+  const [status, setStatus] = useState<WorkerCycleStatus | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetch('/api/status');
+      if (res.ok) setStatus((await res.json()) as WorkerCycleStatus);
+    } catch {
+      // non-critical — hero will simply omit the last-check time
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    const id = setInterval(refresh, 30_000);
+    return () => clearInterval(id);
+  }, [refresh]);
+
+  return status;
+}
+
 // ─── Coin icon ────────────────────────────────────────────────────────────────
 
 function CoinIcon({ symbol }: { symbol: string }) {
   const [failed, setFailed] = useState(false);
+  const color = getAssetColor(symbol);
 
   if (failed) {
     return (
-      <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
-        <span className="text-[11px] font-bold text-primary leading-none select-none">
-          {symbol.slice(0, 2)}
-        </span>
+      <div
+        className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 text-[11px] font-bold leading-none select-none"
+        style={{ background: color + '22', color }}
+      >
+        {symbol.slice(0, 2)}
       </div>
     );
   }
@@ -110,24 +231,111 @@ function CoinIcon({ symbol }: { symbol: string }) {
     <img
       src={`https://assets.coincap.io/assets/icons/${symbol.toLowerCase()}@2x.png`}
       alt={symbol}
-      width={32}
-      height={32}
-      className="w-8 h-8 rounded-full shrink-0 object-contain bg-white/5"
+      width={36}
+      height={36}
+      className="w-9 h-9 rounded-full shrink-0 object-contain bg-white/5"
       onError={() => setFailed(true)}
     />
   );
 }
 
-// ─── Sub-sections ─────────────────────────────────────────────────────────────
+// ─── Guardian Status Hero ─────────────────────────────────────────────────────
+
+function GuardianStatusHero({
+  activeRuleCount,
+  workerStatus,
+}: {
+  activeRuleCount: number | null;
+  workerStatus: WorkerCycleStatus | null;
+}) {
+  return (
+    <div
+      className="relative rounded-2xl overflow-hidden border p-4"
+      style={{
+        borderColor: 'rgba(52,211,153,0.22)',
+        background: 'linear-gradient(135deg, rgba(10,31,24,0.9) 0%, hsl(var(--card)) 100%)',
+      }}
+    >
+      {/* Radial glow origin at top-left */}
+      <div
+        className="absolute top-0 left-0 w-48 h-48 pointer-events-none"
+        style={{
+          background:
+            'radial-gradient(circle at 0% 0%, rgba(52,211,153,0.14) 0%, transparent 65%)',
+        }}
+      />
+
+      <div className="relative flex items-center justify-between gap-3">
+        {/* Left: indicator + label */}
+        <div className="flex items-center gap-3 min-w-0">
+          {/* Pulsing dot */}
+          <div className="relative shrink-0 w-2.5 h-2.5">
+            <div
+              className="absolute inset-0 rounded-full animate-ping"
+              style={{ backgroundColor: '#34d399', opacity: 0.6 }}
+            />
+            <div
+              className="relative rounded-full w-2.5 h-2.5"
+              style={{ backgroundColor: '#34d399' }}
+            />
+          </div>
+
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <p className="text-sm font-semibold text-foreground">Guardian Active</p>
+              <Shield className="w-3.5 h-3.5 shrink-0" style={{ color: '#34d399', opacity: 0.7 }} />
+            </div>
+            <p className="text-xs text-muted-foreground leading-snug mt-0.5">
+              {activeRuleCount === null ? (
+                'Checking rules…'
+              ) : activeRuleCount === 0 ? (
+                'No active rules — add one to start monitoring'
+              ) : (
+                <>
+                  Monitoring{' '}
+                  <span className="font-semibold" style={{ color: '#34d399' }}>
+                    {activeRuleCount}
+                  </span>{' '}
+                  {activeRuleCount === 1 ? 'rule' : 'rules'} across your portfolio
+                </>
+              )}
+            </p>
+          </div>
+        </div>
+
+        {/* Right: last cycle time */}
+        {workerStatus !== null && (
+          <div className="text-right shrink-0">
+            <p className="text-[9px] uppercase tracking-widest text-muted-foreground/40 mb-0.5">
+              Last check
+            </p>
+            <p
+              className="text-xs font-medium tabular-nums"
+              style={{ color: 'rgba(52,211,153,0.75)' }}
+            >
+              {workerStatus.lastCycleAt
+                ? relativeTime(workerStatus.lastCycleAt)
+                : 'Starting…'}
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Portfolio section ────────────────────────────────────────────────────────
 
 function PortfolioSection({
   state,
   onRetry,
   onSwitchAccount,
+  livePrices,
 }: {
   state: PortfolioState;
   onRetry: () => void;
   onSwitchAccount: () => void;
+  livePrices: Record<string, number>;
 }) {
   if (state.status === 'loading') {
     return (
@@ -143,10 +351,7 @@ function PortfolioSection({
       <div className="rounded-2xl border border-card-border bg-card p-6 text-center space-y-3">
         <p className="text-sm text-muted-foreground">No active OKX connection found.</p>
         <Link href="/connect-okx">
-          <Button
-            size="sm"
-            className="bg-primary hover:bg-primary/90 text-primary-foreground"
-          >
+          <Button size="sm" style={{ background: '#34d399', color: '#0a0d0f' }}>
             Connect OKX Account
           </Button>
         </Link>
@@ -160,9 +365,7 @@ function PortfolioSection({
         <div className="flex gap-2 items-start">
           <AlertTriangle className="w-4 h-4 text-[#f59e0b] shrink-0 mt-0.5" />
           <div className="space-y-1">
-            <p className="text-sm font-medium text-[#f59e0b]">
-              Couldn't fetch your portfolio.
-            </p>
+            <p className="text-sm font-medium text-[#f59e0b]">Couldn't fetch your portfolio.</p>
             <p className="text-xs text-[#f59e0b]/70 leading-relaxed">
               {state.message} — Check your OKX connection or{' '}
               <Link href="/connect-okx" className="underline underline-offset-2">
@@ -227,54 +430,83 @@ function PortfolioSection({
         </div>
       ) : (
         <ul className="divide-y divide-card-border/40">
-          {data.assets.map((a) => (
-            <li key={a.symbol} className="px-5 py-3 flex items-center gap-3">
-              <CoinIcon symbol={a.symbol} />
+          {data.assets.map((a) => {
+            const accentColor = getAssetColor(a.symbol);
+            const livePrice   = livePrices[a.symbol];
 
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-foreground">{a.symbol}</p>
-                <p className="text-xs text-muted-foreground tabular-nums">
-                  {fmtBal(a.balance)}&nbsp;{a.symbol}
-                </p>
-              </div>
+            return (
+              <li key={a.symbol} className="px-5 py-3.5 flex items-center gap-3">
+                {/* Left accent stripe */}
+                <div
+                  className="w-0.5 h-8 rounded-full shrink-0"
+                  style={{ backgroundColor: accentColor, opacity: 0.5 }}
+                />
 
-              <div className="text-right shrink-0 space-y-1">
-                <p className="text-sm font-medium text-foreground tabular-nums">
-                  {fmtUsd(a.usdValue)}
-                </p>
-                <div className="flex items-center gap-1.5 justify-end">
-                  <div className="h-1 rounded-full bg-card-border/60 w-16 overflow-hidden">
-                    <div
-                      className="h-full rounded-full bg-primary/60"
-                      style={{ width: `${Math.min(a.pct, 100)}%` }}
-                    />
-                  </div>
-                  <span className="text-[10px] text-muted-foreground/70 tabular-nums w-9 text-right">
-                    {a.pct.toFixed(1)}%
-                  </span>
+                <CoinIcon symbol={a.symbol} />
+
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-foreground">{a.symbol}</p>
+                  <p className="text-xs text-muted-foreground/70 tabular-nums">
+                    {fmtBal(a.balance)}&nbsp;{a.symbol}
+                  </p>
                 </div>
-              </div>
-            </li>
-          ))}
+
+                <div className="text-right shrink-0">
+                  <p className="text-sm font-semibold text-foreground tabular-nums">
+                    {fmtUsd(a.usdValue)}
+                  </p>
+                  {/* Live market price */}
+                  {livePrice !== undefined ? (
+                    <p
+                      className="text-[11px] tabular-nums mt-0.5"
+                      style={{ color: accentColor, opacity: 0.75 }}
+                    >
+                      {fmtPrice(livePrice)}&nbsp;/{a.symbol}
+                    </p>
+                  ) : (
+                    <p className="text-[11px] text-muted-foreground/30 mt-0.5">loading…</p>
+                  )}
+                  {/* Allocation bar */}
+                  <div className="flex items-center gap-1.5 justify-end mt-1.5">
+                    <div className="h-1.5 rounded-full bg-white/5 w-16 overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-all duration-700"
+                        style={{
+                          width: `${Math.min(a.pct, 100)}%`,
+                          backgroundColor: accentColor,
+                          opacity: 0.75,
+                        }}
+                      />
+                    </div>
+                    <span className="text-[10px] text-muted-foreground/50 tabular-nums w-8 text-right">
+                      {a.pct.toFixed(0)}%
+                    </span>
+                  </div>
+                </div>
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>
   );
 }
 
+// ─── Active rules row ─────────────────────────────────────────────────────────
+
 function ActiveRulesRow({ count }: { count: number | null }) {
   return (
     <Link href="/rules">
-      <div className="rounded-xl border border-card-border bg-card px-4 py-3 flex items-center gap-3 hover:border-primary/30 transition-colors group">
-        <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
-          <ShieldCheck className="w-4 h-4 text-primary" />
+      <div className="rounded-xl border border-card-border bg-card px-4 py-3 flex items-center gap-3 hover:border-blue-500/30 transition-colors group">
+        <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center shrink-0">
+          <ShieldCheck className="w-4 h-4 text-blue-400" />
         </div>
         <div className="flex-1">
           {count === null ? (
             <p className="text-sm text-muted-foreground">Loading rules…</p>
           ) : (
             <p className="text-sm font-medium text-foreground">
-              <span className="text-primary">{count}</span>{' '}
+              <span className="text-blue-400">{count}</span>{' '}
               {count === 1 ? 'active rule' : 'active rules'} protecting your portfolio
             </p>
           )}
@@ -283,6 +515,49 @@ function ActiveRulesRow({ count }: { count: number | null }) {
       </div>
     </Link>
   );
+}
+
+// ─── Activity log ─────────────────────────────────────────────────────────────
+
+type ActionIconType = typeof Zap;
+
+interface ActionStyle {
+  Icon: ActionIconType;
+  iconColor: string;
+  iconBg: string;
+  rowBg?: string;
+}
+
+function getActionStyle(action: string): ActionStyle {
+  const lower = action.toLowerCase();
+  if (lower.includes('sold') || lower.includes('sell') || lower.includes('failed')) {
+    return {
+      Icon: TrendingDown,
+      iconColor: '#f87171',
+      iconBg: 'rgba(239,68,68,0.15)',
+      rowBg: 'rgba(239,68,68,0.03)',
+    };
+  }
+  if (lower.includes('buy') || lower.includes('bought') || lower.includes('purchase')) {
+    return {
+      Icon: TrendingUp,
+      iconColor: '#34d399',
+      iconBg: 'rgba(52,211,153,0.15)',
+      rowBg: 'rgba(52,211,153,0.03)',
+    };
+  }
+  if (lower.includes('alert')) {
+    return {
+      Icon: Bell,
+      iconColor: '#fbbf24',
+      iconBg: 'rgba(251,191,36,0.15)',
+    };
+  }
+  return {
+    Icon: Zap,
+    iconColor: 'hsl(var(--muted-foreground))',
+    iconBg: 'rgba(255,255,255,0.06)',
+  };
 }
 
 function ActivityLog({
@@ -306,7 +581,6 @@ function ActivityLog({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-semibold text-foreground">Activity Log</h2>
-          {/* Subtle "live" indicator when we have pending entries */}
           {pendingEntries.length > 0 && (
             <span className="flex items-center gap-1 text-[10px] font-medium text-amber-400/80 bg-amber-500/10 border border-amber-500/20 px-1.5 py-0.5 rounded-full">
               <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
@@ -332,8 +606,8 @@ function ActivityLog({
         </div>
       ) : isEmpty ? (
         <div className="rounded-2xl border border-dashed border-card-border bg-card/50 p-8 flex flex-col items-center text-center gap-3">
-          <div className="w-12 h-12 rounded-2xl bg-primary/10 flex items-center justify-center">
-            <ShieldCheck className="w-6 h-6 text-primary/60" />
+          <div className="w-12 h-12 rounded-2xl bg-blue-500/10 flex items-center justify-center">
+            <ShieldCheck className="w-6 h-6 text-blue-400/60" />
           </div>
           <div className="space-y-1">
             <p className="text-sm font-medium text-foreground">No actions yet</p>
@@ -345,10 +619,9 @@ function ActivityLog({
       ) : (
         <div className="rounded-2xl border border-card-border bg-card divide-y divide-card-border/40 overflow-hidden">
 
-          {/* ── Pending rows at the top ─────────────────────────────────── */}
+          {/* ── Pending rows ──────────────────────────────────────────────── */}
           {pendingEntries.map((p) => (
             <div key={p.id} className="px-4 py-3 flex gap-3 items-start bg-amber-500/5">
-              {/* Pulsing amber icon to distinguish from confirmed entries */}
               <div className="mt-0.5 w-7 h-7 rounded-lg bg-amber-500/15 flex items-center justify-center shrink-0">
                 <Clock className="w-3.5 h-3.5 text-amber-400" />
               </div>
@@ -358,12 +631,18 @@ function ActivityLog({
                     {p.asset ? `Buying ${p.asset}` : 'Order submitted'}
                   </p>
                   {p.asset && (
-                    <span className="text-xs font-semibold text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded">
+                    <span
+                      className="text-xs font-semibold px-1.5 py-0.5 rounded"
+                      style={{
+                        color: getAssetColor(p.asset),
+                        background: getAssetColor(p.asset) + '22',
+                      }}
+                    >
                       {p.asset}
                     </span>
                   )}
                 </div>
-                <p className="text-xs text-muted-foreground leading-relaxed">
+                <p className="text-xs text-muted-foreground">
                   Submitted — waiting for OKX confirmation
                 </p>
               </div>
@@ -374,7 +653,7 @@ function ActivityLog({
             </div>
           ))}
 
-          {/* ── Confirmed log entries ───────────────────────────────────── */}
+          {/* ── Confirmed log entries ─────────────────────────────────────── */}
           {entries.map((entry) => {
             const action = String(entry.action_taken ?? entry.action ?? 'Action');
             const asset  = String(entry.asset ?? '—');
@@ -383,11 +662,19 @@ function ActivityLog({
               ? String(entry.details).replace(/^amount:\s*/, '')
               : null;
             const ts = entry.created_at;
+            const { Icon, iconColor, iconBg, rowBg } = getActionStyle(action);
 
             return (
-              <div key={entry.id} className="px-4 py-3 flex gap-3 items-start">
-                <div className="mt-0.5 w-7 h-7 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
-                  <Zap className="w-3.5 h-3.5 text-primary" />
+              <div
+                key={entry.id}
+                className="px-4 py-3 flex gap-3 items-start"
+                style={rowBg ? { background: rowBg } : undefined}
+              >
+                <div
+                  className="mt-0.5 w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
+                  style={{ background: iconBg }}
+                >
+                  <Icon className="w-3.5 h-3.5" style={{ color: iconColor }} />
                 </div>
                 <div className="flex-1 min-w-0 space-y-0.5">
                   <div className="flex items-baseline gap-2 flex-wrap">
@@ -395,14 +682,18 @@ function ActivityLog({
                       {action.replace(/_/g, ' ')}
                     </p>
                     {asset !== '—' && (
-                      <span className="text-xs font-semibold text-primary bg-primary/10 px-1.5 py-0.5 rounded">
+                      <span
+                        className="text-xs font-semibold px-1.5 py-0.5 rounded"
+                        style={{
+                          color: getAssetColor(asset),
+                          background: getAssetColor(asset) + '22',
+                        }}
+                      >
                         {asset}
                       </span>
                     )}
                     {amount && (
-                      <span className="text-xs text-muted-foreground">
-                        {amount}
-                      </span>
+                      <span className="text-xs text-muted-foreground">{amount}</span>
                     )}
                   </div>
                   {reason && (
@@ -440,8 +731,6 @@ export default function DashboardPage() {
   const [logEntries, setLogEntries] = useState<TradeLogEntry[]>([]);
   const [logLoading, setLogLoading] = useState(true);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
-
-  /** Optimistic pending entries — submitted but not yet confirmed in trade_log */
   const [pendingEntries, setPendingEntries] = useState<PendingEntry[]>([]);
 
   const connRef   = useRef<OkxConnection | null>(null);
@@ -477,6 +766,17 @@ export default function DashboardPage() {
 
     setLocation('/connect-okx');
   };
+
+  // ── Live prices ────────────────────────────────────────────────────────────
+  const portfolioSymbols = useMemo(() => {
+    if (portfolioState.status !== 'ok') return [];
+    return portfolioState.data.assets.map((a) => a.symbol);
+  }, [portfolioState]);
+
+  const livePrices = useLivePrices(portfolioSymbols);
+
+  // ── Worker status (for Guardian Status hero) ───────────────────────────────
+  const workerStatus = useWorkerStatus();
 
   // ── Load OKX connection + portfolio ────────────────────────────────────────
   const loadPortfolio = useCallback(async (conn: OkxConnection) => {
@@ -527,18 +827,14 @@ export default function DashboardPage() {
   // ── Load active rule count ─────────────────────────────────────────────────
   const loadRuleCount = useCallback(async () => {
     if (!userId) return;
-    // Use count: 'exact' + head: true so Supabase returns just the count
-    // without fetching row data — faster and lighter on the network.
     const { count, error } = await supabase
       .from('rules')
       .select('*', { count: 'exact', head: true })
       .eq('user_id', userId)
       .eq('active', true);
     if (error) {
-      // Log so Replit's console surfaces the underlying cause (e.g. RLS
-      // policy blocking access, or a column name mismatch).
       console.error('[dashboard] loadRuleCount error:', error.message, error.code);
-      return; // leave the count as-is rather than zeroing it on error
+      return;
     }
     setActiveRuleCount(count ?? 0);
   }, [userId]);
@@ -571,18 +867,11 @@ export default function DashboardPage() {
     setLastRefreshed(new Date());
     setLogLoading(false);
 
-    // ── Reconcile pending entries ──────────────────────────────────────────
-    // Remove any pending entry that either:
-    //   (a) has a matching real entry (same asset, created_at >= submittedAt), or
-    //   (b) has expired (> PENDING_EXPIRY_MS old)
     setPendingEntries((prev) => {
       if (prev.length === 0) return prev;
       const now = Date.now();
       return prev.filter((p) => {
-        // Expire after timeout regardless
         if (now - p.submittedAt > PENDING_EXPIRY_MS) return false;
-
-        // Clear if a real entry with this asset appeared after submission
         const fulfilled = fresh.some((e) => {
           if (!e.asset || e.asset !== p.asset) return false;
           if (!e.created_at) return false;
@@ -601,7 +890,7 @@ export default function DashboardPage() {
     loadLog(true);
   }, [userId, initPortfolio, loadRuleCount, loadLog]);
 
-  // ── Auto-refresh log — faster when there are pending entries ──────────────
+  // ── Auto-refresh log ───────────────────────────────────────────────────────
   useEffect(() => {
     const interval = pendingEntries.length > 0
       ? PENDING_REFRESH_INTERVAL_MS
@@ -624,32 +913,25 @@ export default function DashboardPage() {
     loadRuleCount();
   };
 
-  // ── Handle buy submission ack ──────────────────────────────────────────────
-  //
-  // Called by BuySheet immediately after the server acks the request (~300ms).
-  // We add a pending entry so the user sees immediate feedback, and the faster
-  // poll interval kicks in automatically (pendingEntries.length > 0).
+  // ── Buy success ────────────────────────────────────────────────────────────
   const handleBuySuccess = (pending: BuyPendingAction) => {
     setPendingEntries((prev) => [
       ...prev,
       { id: newPendingId(), ...pending },
     ]);
-    // Trigger one immediate silent refresh so the log is as fresh as possible
     loadLog(false);
   };
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-[100dvh] flex flex-col bg-background">
-      <div className="w-full max-w-[420px] mx-auto px-4 pt-10 pb-2 space-y-5">
+      <div className="w-full max-w-[420px] mx-auto px-4 pt-10 pb-2 space-y-4">
 
         {/* Header */}
         <div className="flex items-start justify-between gap-2">
           <div className="space-y-1">
             <h1 className="text-2xl font-semibold tracking-tight text-foreground">Dashboard</h1>
-            <p className="text-sm text-muted-foreground">
-              Your OKX portfolio, live.
-            </p>
+            <p className="text-sm text-muted-foreground">Your OKX portfolio, live.</p>
           </div>
           <button
             onClick={handleSignOut}
@@ -660,14 +942,21 @@ export default function DashboardPage() {
           </button>
         </div>
 
+        {/* Guardian Status Hero */}
+        <GuardianStatusHero
+          activeRuleCount={activeRuleCount}
+          workerStatus={workerStatus}
+        />
+
         {/* Portfolio snapshot */}
         <PortfolioSection
           state={portfolioState}
           onRetry={() => connRef.current && loadPortfolio(connRef.current)}
           onSwitchAccount={() => setShowDisconnectConfirm(true)}
+          livePrices={livePrices}
         />
 
-        {/* ── Disconnect confirmation card ─────────────────────────────── */}
+        {/* Disconnect confirmation card */}
         {showDisconnectConfirm && (
           <div className="rounded-2xl border border-[#f59e0b]/30 bg-[#451a03]/60 p-5 space-y-4">
             <div className="space-y-1">
@@ -700,7 +989,7 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* Quick Buy action — only shown when a connection is active */}
+        {/* Quick Buy — green is correct here: it IS a buy action */}
         {portfolioState.status === 'ok' && (
           <button
             onClick={() => openBuy()}
@@ -717,7 +1006,7 @@ export default function DashboardPage() {
           </button>
         )}
 
-        {/* Active protection summary */}
+        {/* Active protection rules — blue, not green (not a gain/buy signal) */}
         <ActiveRulesRow count={activeRuleCount} />
 
         {/* Activity log */}
@@ -728,9 +1017,10 @@ export default function DashboardPage() {
           lastRefreshed={lastRefreshed}
           onRefresh={handleLogRefresh}
         />
+
       </div>
 
-      {/* Buy sheet — rendered at page level so it overlays everything */}
+      {/* Buy sheet */}
       <BuySheet
         open={buyOpen}
         onOpenChange={setBuyOpen}

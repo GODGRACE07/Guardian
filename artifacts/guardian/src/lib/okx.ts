@@ -152,6 +152,33 @@ async function okxGet(
   return json.data;
 }
 
+// ─── Public ticker (no auth required) ────────────────────────────────────────
+
+export interface TickerData {
+  /** Last traded price in USDT */
+  last: number;
+}
+
+/**
+ * Fetches the current spot price for `asset`-USDT from OKX's public market
+ * endpoint. No API credentials required. Used by the Dashboard to show live
+ * prices next to each portfolio holding.
+ *
+ * Throws if the asset has no USDT pair (e.g. USDT itself) — callers should
+ * skip stablecoins or catch the error and fall back to a known price.
+ */
+export async function fetchTicker(asset: string): Promise<TickerData> {
+  const instId = `${asset}-USDT`;
+  const res = await fetch(`${OKX_BASE}/api/v5/market/ticker?instId=${instId}`);
+  const json = await res.json() as { code: string; msg?: string; data?: Array<{ last: string }> };
+  if (json.code !== '0') {
+    throw new Error(`OKX ticker [${json.code}] ${instId}: ${json.msg ?? 'unknown error'}`);
+  }
+  const last = parseFloat(json.data?.[0]?.last ?? '0');
+  if (!last) throw new Error(`No price data returned for ${instId}`);
+  return { last };
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**

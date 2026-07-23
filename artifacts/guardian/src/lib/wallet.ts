@@ -248,3 +248,51 @@ export async function signMessage(
 
 export const SIGN_IN_MESSAGE =
   'Sign in to Guardian.\n\nThis request will not trigger a blockchain transaction or cost any fees.';
+
+// ─── Mobile detection & OKX deep-link ────────────────────────────────────────
+
+/** Returns true on common mobile/tablet browsers (Android, iOS). */
+export function isMobileBrowser(): boolean {
+  return /Android|iPhone|iPad|iPod|IEMobile|Opera Mini/i.test(navigator.userAgent);
+}
+
+/**
+ * Attempts to hand off to the OKX Wallet native app via deep link.
+ *
+ * The URI `okx://wallet/dapp/url?dappUrl=<encoded>` launches OKX Wallet's
+ * built-in browser at the current URL, where `window.okxwallet` is injected
+ * and the normal EIP-1193 connection flow completes transparently.
+ *
+ * Detection strategy: if the page becomes hidden within `timeoutMs` ms, the
+ * OS handed control to the app.  If the page stays visible, the app is not
+ * installed and the user is redirected to the appropriate install page.
+ */
+export function openOkxDeepLink(options?: { timeoutMs?: number }): void {
+  const timeoutMs  = options?.timeoutMs ?? 1800;
+  const dappUrl    = encodeURIComponent(window.location.href);
+  const deepLink   = `okx://wallet/dapp/url?dappUrl=${dappUrl}`;
+
+  // Desktop → Chrome Web Store; Mobile → OKX download page (detects OS)
+  const fallbackUrl = isMobileBrowser()
+    ? 'https://www.okx.com/download'
+    : 'https://chromewebstore.google.com/detail/okx-wallet/mcohilncbfahbmgdjkbpemcciiolgcge';
+
+  let appResponded = false;
+
+  const onVisibilityHide = () => {
+    appResponded = true;
+    document.removeEventListener('visibilitychange', onVisibilityHide);
+  };
+  document.addEventListener('visibilitychange', onVisibilityHide);
+
+  // Attempt to open the native app; silently ignored by the OS if not installed
+  window.location.href = deepLink;
+
+  setTimeout(() => {
+    document.removeEventListener('visibilitychange', onVisibilityHide);
+    if (!appResponded) {
+      // App didn't respond — send to the install page in a new tab
+      window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+    }
+  }, timeoutMs);
+}

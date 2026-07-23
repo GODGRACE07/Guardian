@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useLocation } from 'wouter';
-import { ShieldCheck, Loader2, ExternalLink } from 'lucide-react';
+import { ShieldCheck, Loader2, ExternalLink, Smartphone } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import { supabase } from '@/lib/supabase';
@@ -10,54 +10,75 @@ import {
   connectWallet,
   signMessage,
   SIGN_IN_MESSAGE,
+  isMobileBrowser,
+  openOkxDeepLink,
   type DetectedWallet,
 } from '@/lib/wallet';
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+// Only show OKX Wallet — filter any other detected wallets out of the list
+function isOkxWallet(w: DetectedWallet): boolean {
+  const id   = w.id.toLowerCase();
+  const name = w.name.toLowerCase();
+  return (
+    id.startsWith('com.okex') ||
+    id.startsWith('com.okxwallet') ||
+    id.includes('okx') ||
+    name.includes('okx')
+  );
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type DetectionState = 'detecting' | 'none' | 'ready';
-type ConnectStep = 'idle' | 'connecting' | 'signing' | 'verifying';
+type ConnectStep    = 'idle' | 'connecting' | 'signing' | 'verifying';
 
 const STEP_LABELS: Record<ConnectStep, string> = {
-  idle:       'Connect',
+  idle:       'Connect OKX Wallet',
   connecting: 'Connecting…',
-  signing:    'Sign in your wallet…',
+  signing:    'Sign in OKX Wallet…',
   verifying:  'Verifying…',
 };
+
+// OKX brand icon (five-square quincunx on black)
+const OKX_ICON_SVG =
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='18' fill='%23000'/%3E%3Crect x='18' y='18' width='26' height='26' rx='3' fill='%23fff'/%3E%3Crect x='56' y='18' width='26' height='26' rx='3' fill='%23fff'/%3E%3Crect x='37' y='37' width='26' height='26' rx='3' fill='%23fff'/%3E%3Crect x='18' y='56' width='26' height='26' rx='3' fill='%23fff'/%3E%3Crect x='56' y='56' width='26' height='26' rx='3' fill='%23fff'/%3E%3C/svg%3E";
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function AuthPage() {
-  const [, setLocation]    = useLocation();
-  const { toast }          = useToast();
+  const [, setLocation]      = useLocation();
+  const { toast }            = useToast();
   const { setWalletSession } = useAuth();
 
-  const [detection, setDetection]   = useState<DetectionState>('detecting');
-  const [wallets, setWallets]       = useState<DetectedWallet[]>([]);
-  const [step, setStep]             = useState<ConnectStep>('idle');
-  const [activeId, setActiveId]     = useState<string | null>(null); // which wallet is loading
+  const [detection, setDetection] = useState<DetectionState>('detecting');
+  const [wallets, setWallets]     = useState<DetectedWallet[]>([]);
+  const [step, setStep]           = useState<ConnectStep>('idle');
+  const [activeId, setActiveId]   = useState<string | null>(null);
+  const [deepLinking, setDeepLinking] = useState(false);
 
-  // ── Detect wallets on mount ─────────────────────────────────────────────────
+  const mobile = isMobileBrowser();
+
+  // ── Detect wallets — filter to OKX only ────────────────────────────────────
   useEffect(() => {
     detectWallets().then((found) => {
-      setWallets(found);
-      setDetection(found.length === 0 ? 'none' : 'ready');
+      const okx = found.filter(isOkxWallet);
+      setWallets(okx);
+      setDetection(okx.length === 0 ? 'none' : 'ready');
     });
   }, []);
 
-  // ── Auth flow ───────────────────────────────────────────────────────────────
+  // ── EIP-1193 connect + sign flow ────────────────────────────────────────────
   const handleConnect = async (wallet: DetectedWallet) => {
     setActiveId(wallet.id);
     setStep('connecting');
     try {
-      // 1 — Request account access
       const address = await connectWallet(wallet.provider);
 
-      // 2 — Prove ownership with a free off-chain signature
       setStep('signing');
       await signMessage(wallet.provider, address, SIGN_IN_MESSAGE);
 
-      // 3 — Look up or create the user row
       setStep('verifying');
       const { data: existing, error: lookupError } = await supabase
         .from('users')
@@ -82,15 +103,14 @@ export default function AuthPage() {
 
       setWalletSession(address, userId);
 
-      // 4 — Route based on existing OKX connection
-      const { data: connection } = await supabase
+      const { data: conn } = await supabase
         .from('okx_connections')
         .select('id')
         .eq('user_id', userId)
         .eq('active', true)
         .maybeSingle();
 
-      setLocation(connection ? '/dashboard' : '/connect-okx');
+      setLocation(conn ? '/dashboard' : '/connect-okx');
     } catch (error: unknown) {
       const err = error as { code?: number; message?: string };
       const isRejection = err.code === 4001;
@@ -98,13 +118,30 @@ export default function AuthPage() {
         variant: 'destructive',
         title: isRejection ? 'Signature cancelled' : 'Connection failed',
         description: isRejection
-          ? 'Please approve the sign-in request in your wallet to continue.'
+          ? 'Please approve the sign-in request in OKX Wallet to continue.'
           : (err.message ?? 'Something went wrong. Please try again.'),
       });
     } finally {
       setStep('idle');
       setActiveId(null);
     }
+  };
+
+  // ── Mobile deep-link / desktop install handler ──────────────────────────────
+  const handleGetOkx = () => {
+    if (!mobile) {
+      // Desktop: open extension page directly
+      window.open(
+        'https://chromewebstore.google.com/detail/okx-wallet/mcohilncbfahbmgdjkbpemcciiolgcge',
+        '_blank',
+        'noopener,noreferrer',
+      );
+      return;
+    }
+    // Mobile: try deep-link into OKX Wallet app first; fall back to download
+    setDeepLinking(true);
+    openOkxDeepLink({ timeoutMs: 1800 });
+    setTimeout(() => setDeepLinking(false), 2600);
   };
 
   const isLoading = step !== 'idle';
@@ -115,112 +152,107 @@ export default function AuthPage() {
       className="min-h-[100dvh] flex flex-col items-center justify-center p-6 bg-background"
       data-testid="page-auth"
     >
-      <div className="w-full max-w-[380px] flex flex-col items-center gap-10">
+      <div className="w-full max-w-[360px] flex flex-col items-center gap-10">
 
         {/* Brand mark */}
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-16 w-16 rounded-2xl bg-primary/10 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="h-16 w-16 rounded-2xl bg-primary/10 flex items-center justify-center ring-1 ring-primary/20">
             <ShieldCheck className="w-9 h-9 text-primary" />
           </div>
-          <div className="text-center">
-            <h1 className="text-2xl font-semibold tracking-tight text-foreground">
-              Guardian
-            </h1>
-            <p className="text-sm text-muted-foreground mt-1">
-              Portfolio protection for OKX
-            </p>
+          <div className="text-center space-y-1">
+            <h1 className="text-2xl font-semibold tracking-tight text-foreground">Guardian</h1>
+            <p className="text-sm text-muted-foreground">Portfolio protection for OKX</p>
           </div>
         </div>
 
         {/* Connect card */}
-        <div className="w-full bg-card border border-card-border rounded-2xl p-8 flex flex-col items-center gap-6">
+        <div className="w-full bg-card border border-card-border rounded-2xl overflow-hidden shadow-lg shadow-black/20">
 
           {/* ── Detecting ──────────────────────────────────────────────────── */}
           {detection === 'detecting' && (
-            <>
-              <p className="text-lg font-medium text-foreground">Sign in with your wallet</p>
+            <div className="p-8 flex flex-col items-center gap-5">
+              <p className="text-base font-medium text-foreground">Checking for OKX Wallet…</p>
               <div className="flex items-center gap-2 text-muted-foreground text-sm">
                 <Loader2 className="w-4 h-4 animate-spin" />
-                Detecting wallets…
+                Scanning for wallet extensions
               </div>
-            </>
+            </div>
           )}
 
-          {/* ── No wallet found ─────────────────────────────────────────────── */}
+          {/* ── No OKX Wallet found ─────────────────────────────────────────── */}
           {detection === 'none' && (
-            <>
+            <div className="p-8 flex flex-col items-center gap-6">
               <div className="text-center space-y-2">
-                <p className="text-lg font-medium text-foreground">No wallet detected</p>
+                <p className="text-base font-semibold text-foreground">OKX Wallet required</p>
                 <p className="text-sm text-muted-foreground leading-relaxed">
-                  For the best experience, use OKX Wallet or MetaMask.
+                  {mobile
+                    ? 'Open this page inside the OKX Wallet app, or install OKX Wallet first.'
+                    : 'Install the OKX Wallet browser extension to continue.'}
                 </p>
               </div>
-              <div className="w-full flex flex-col gap-3">
-                <a
-                  href="https://www.okx.com/web3"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full"
+
+              <div className="w-full space-y-3">
+                <Button
+                  onClick={handleGetOkx}
+                  disabled={deepLinking}
+                  className="w-full h-12 text-sm font-semibold bg-primary hover:bg-primary/90 text-primary-foreground gap-2.5"
                 >
-                  <Button
-                    variant="default"
-                    className="w-full h-12 text-sm font-medium bg-primary hover:bg-primary/90 text-primary-foreground gap-2"
-                  >
+                  {deepLinking ? (
+                    <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                  ) : (
                     <img
-                      src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='18' fill='%23000'/%3E%3Crect x='18' y='18' width='26' height='26' rx='3' fill='%23fff'/%3E%3Crect x='56' y='18' width='26' height='26' rx='3' fill='%23fff'/%3E%3Crect x='37' y='37' width='26' height='26' rx='3' fill='%23fff'/%3E%3Crect x='18' y='56' width='26' height='26' rx='3' fill='%23fff'/%3E%3Crect x='56' y='56' width='26' height='26' rx='3' fill='%23fff'/%3E%3C/svg%3E"
-                      alt="OKX Wallet"
-                      className="w-5 h-5 rounded-md"
+                      src={OKX_ICON_SVG}
+                      alt=""
+                      aria-hidden="true"
+                      className="w-5 h-5 rounded-md shrink-0"
                     />
-                    Get OKX Wallet
-                    <ExternalLink className="w-3.5 h-3.5 opacity-60" />
-                  </Button>
-                </a>
-                <a
-                  href="https://metamask.io/download/"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full"
-                >
-                  <Button
-                    variant="outline"
-                    className="w-full h-12 text-sm font-medium gap-2 border-card-border text-foreground hover:bg-white/5"
-                  >
-                    <img
-                      src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='18' fill='%23F6851B'/%3E%3Cpolygon points='50,15 78,30 78,55 50,85 22,55 22,30' fill='%23fff' opacity='0.9'/%3E%3Cpolygon points='50,15 78,30 64,45 50,38' fill='%23E2761B'/%3E%3Cpolygon points='22,30 50,15 50,38 36,45' fill='%23E4761B'/%3E%3Ccircle cx='50' cy='55' r='10' fill='%23F6851B'/%3E%3C/svg%3E"
-                      alt="MetaMask"
-                      className="w-5 h-5 rounded-md"
-                    />
-                    Get MetaMask
-                    <ExternalLink className="w-3.5 h-3.5 opacity-60" />
-                  </Button>
-                </a>
+                  )}
+                  <span className="flex-1 text-left">
+                    {deepLinking
+                      ? 'Opening OKX Wallet…'
+                      : mobile
+                        ? 'Open in OKX Wallet'
+                        : 'Get OKX Wallet Extension'}
+                  </span>
+                  {!deepLinking && (
+                    mobile
+                      ? <Smartphone className="w-3.5 h-3.5 opacity-60 shrink-0" />
+                      : <ExternalLink className="w-3.5 h-3.5 opacity-60 shrink-0" />
+                  )}
+                </Button>
+
+                {mobile && !deepLinking && (
+                  <p className="text-center text-xs text-muted-foreground/70 leading-relaxed">
+                    Already installed?{' '}
+                    <button
+                      onClick={() => window.location.reload()}
+                      className="text-primary underline underline-offset-2 hover:opacity-80 transition-opacity"
+                    >
+                      Refresh this page
+                    </button>{' '}
+                    to detect the wallet.
+                  </p>
+                )}
               </div>
-              <p className="text-xs text-muted-foreground text-center leading-relaxed">
-                Install a wallet extension, then refresh this page.
-              </p>
-            </>
+            </div>
           )}
 
-          {/* ── Wallet(s) detected ──────────────────────────────────────────── */}
+          {/* ── OKX Wallet detected ─────────────────────────────────────────── */}
           {detection === 'ready' && (
-            <>
-              <div className="text-center">
-                <h2 className="text-lg font-medium text-foreground">
-                  {wallets.length === 1
-                    ? 'Sign in with your wallet'
-                    : 'Choose a wallet'}
+            <div className="p-8 flex flex-col items-center gap-6">
+              <div className="text-center space-y-1.5">
+                <h2 className="text-base font-semibold text-foreground">
+                  Sign in with OKX Wallet
                 </h2>
+                <p className="text-sm text-muted-foreground leading-relaxed">
+                  We'll ask you to sign a short message — no fees, no transaction.
+                </p>
               </div>
 
-              <div className="w-full flex flex-col gap-3">
+              <div className="w-full flex flex-col gap-2.5">
                 {wallets.map((wallet) => {
-                  const isThisLoading = isLoading && activeId === wallet.id;
+                  const isThisLoading  = isLoading && activeId === wallet.id;
                   const isOtherLoading = isLoading && activeId !== wallet.id;
-                  const label = isThisLoading
-                    ? STEP_LABELS[step]
-                    : wallets.length === 1
-                      ? `Connect ${wallet.name}`
-                      : wallet.name;
 
                   return (
                     <Button
@@ -229,10 +261,8 @@ export default function AuthPage() {
                       disabled={isLoading}
                       data-testid={`btn-connect-${wallet.id}`}
                       className={[
-                        'w-full h-12 text-sm font-medium gap-3 justify-start px-4',
-                        wallets.length === 1
-                          ? 'bg-primary hover:bg-primary/90 text-primary-foreground'
-                          : 'bg-white/5 hover:bg-white/10 text-foreground border border-card-border',
+                        'w-full h-12 text-sm font-semibold gap-3 justify-start px-4',
+                        'bg-primary hover:bg-primary/90 text-primary-foreground',
                         isOtherLoading ? 'opacity-40' : '',
                       ].join(' ')}
                     >
@@ -244,30 +274,34 @@ export default function AuthPage() {
                           alt={wallet.name}
                           className="w-6 h-6 rounded-md shrink-0"
                           onError={(e) => {
-                            // Hide broken icons gracefully
                             (e.currentTarget as HTMLImageElement).style.display = 'none';
                           }}
                         />
                       )}
-                      <span className="flex-1 text-left">{label}</span>
+                      <span className="flex-1 text-left">
+                        {isThisLoading ? STEP_LABELS[step] : `Connect ${wallet.name}`}
+                      </span>
                     </Button>
                   );
                 })}
               </div>
+            </div>
+          )}
 
-              <p className="text-xs text-muted-foreground text-center leading-relaxed">
-                We use your wallet to identify you securely — no email or password
-                needed.
+          {/* Fine print inside card — show once detection is complete */}
+          {detection !== 'detecting' && (
+            <div className="px-8 pb-7 -mt-1">
+              <p className="text-xs text-muted-foreground/50 text-center leading-relaxed">
+                Signing is free — no transaction will be sent.
               </p>
-            </>
+            </div>
           )}
         </div>
 
-        {/* Fine print */}
-        <p className="text-xs text-muted-foreground/50 text-center leading-5">
-          Supports OKX Wallet, MetaMask, and any EIP-1193 compatible wallet.
-          <br />
-          Signing is free — no transaction will be sent.
+        {/* External fine print */}
+        <p className="text-xs text-muted-foreground/35 text-center leading-5 max-w-[280px]">
+          Guardian uses your OKX Wallet address to identify you.
+          No email or password required.
         </p>
       </div>
     </div>

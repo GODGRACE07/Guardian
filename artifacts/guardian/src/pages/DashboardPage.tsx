@@ -535,7 +535,7 @@ function getActionStyle(action: string): ActionStyle {
       Icon: TrendingDown,
       iconColor: '#f87171',
       iconBg: 'rgba(239,68,68,0.15)',
-      rowBg: 'rgba(239,68,68,0.03)',
+      rowBg: 'rgba(239,68,68,0.025)',
     };
   }
   if (lower.includes('buy') || lower.includes('bought') || lower.includes('purchase')) {
@@ -543,7 +543,7 @@ function getActionStyle(action: string): ActionStyle {
       Icon: TrendingUp,
       iconColor: '#34d399',
       iconBg: 'rgba(52,211,153,0.15)',
-      rowBg: 'rgba(52,211,153,0.03)',
+      rowBg: 'rgba(52,211,153,0.025)',
     };
   }
   if (lower.includes('alert')) {
@@ -560,6 +560,8 @@ function getActionStyle(action: string): ActionStyle {
   };
 }
 
+const ACTIVITY_INITIAL_SHOWN = 8;
+
 function ActivityLog({
   entries,
   pendingEntries,
@@ -573,12 +575,16 @@ function ActivityLog({
   lastRefreshed: Date | null;
   onRefresh: () => void;
 }) {
-  const isEmpty = entries.length === 0 && pendingEntries.length === 0;
+  const [showAll, setShowAll] = useState(false);
+
+  const shownEntries = showAll ? entries : entries.slice(0, ACTIVITY_INITIAL_SHOWN);
+  const hiddenCount  = entries.length - ACTIVITY_INITIAL_SHOWN;
+  const isEmpty      = entries.length === 0 && pendingEntries.length === 0;
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-2.5">
       {/* Section header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-semibold text-foreground">Activity Log</h2>
           {pendingEntries.length > 0 && (
@@ -588,15 +594,17 @@ function ActivityLog({
             </span>
           )}
         </div>
-        <button
+        {/* Prominent manual refresh button */}
+        <Button
+          size="sm"
+          variant="ghost"
           onClick={onRefresh}
           disabled={loading}
-          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-          aria-label="Refresh log"
+          className="h-7 px-2.5 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
         >
-          <RefreshCw className={['w-3 h-3', loading ? 'animate-spin' : ''].join(' ')} />
-          {lastRefreshed ? relativeTime(lastRefreshed.toISOString()) : ''}
-        </button>
+          <RefreshCw className={['w-3 h-3 shrink-0', loading ? 'animate-spin' : ''].join(' ')} />
+          {lastRefreshed ? `Updated ${relativeTime(lastRefreshed.toISOString())}` : 'Refresh'}
+        </Button>
       </div>
 
       {loading && isEmpty ? (
@@ -617,11 +625,14 @@ function ActivityLog({
           </div>
         </div>
       ) : (
-        <div className="rounded-2xl border border-card-border bg-card divide-y divide-card-border/40 overflow-hidden">
+        <div className="rounded-2xl border border-card-border bg-card overflow-hidden">
 
           {/* ── Pending rows ──────────────────────────────────────────────── */}
           {pendingEntries.map((p) => (
-            <div key={p.id} className="px-4 py-3 flex gap-3 items-start bg-amber-500/5">
+            <div
+              key={p.id}
+              className="px-4 py-3 flex gap-3 items-start bg-amber-500/5 border-b border-card-border/40"
+            >
               <div className="mt-0.5 w-7 h-7 rounded-lg bg-amber-500/15 flex items-center justify-center shrink-0">
                 <Clock className="w-3.5 h-3.5 text-amber-400" />
               </div>
@@ -654,7 +665,7 @@ function ActivityLog({
           ))}
 
           {/* ── Confirmed log entries ─────────────────────────────────────── */}
-          {entries.map((entry) => {
+          {shownEntries.map((entry, idx) => {
             const action = String(entry.action_taken ?? entry.action ?? 'Action');
             const asset  = String(entry.asset ?? '—');
             const reason = String(entry.reason ?? '');
@@ -663,11 +674,12 @@ function ActivityLog({
               : null;
             const ts = entry.created_at;
             const { Icon, iconColor, iconBg, rowBg } = getActionStyle(action);
+            const isLast = idx === shownEntries.length - 1 && hiddenCount <= 0 && !showAll;
 
             return (
               <div
                 key={entry.id}
-                className="px-4 py-3 flex gap-3 items-start"
+                className={['px-4 py-3 flex gap-3 items-start', isLast ? '' : 'border-b border-card-border/40'].join(' ')}
                 style={rowBg ? { background: rowBg } : undefined}
               >
                 <div
@@ -708,6 +720,24 @@ function ActivityLog({
               </div>
             );
           })}
+
+          {/* ── Show more / Show less ─────────────────────────────────────── */}
+          {!showAll && hiddenCount > 0 && (
+            <button
+              onClick={() => setShowAll(true)}
+              className="w-full py-3 border-t border-card-border/40 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-white/[0.02] transition-colors text-center"
+            >
+              Show {hiddenCount} more {hiddenCount === 1 ? 'entry' : 'entries'}
+            </button>
+          )}
+          {showAll && entries.length > ACTIVITY_INITIAL_SHOWN && (
+            <button
+              onClick={() => setShowAll(false)}
+              className="w-full py-3 border-t border-card-border/40 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-white/[0.02] transition-colors text-center"
+            >
+              Show less
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -925,7 +955,7 @@ export default function DashboardPage() {
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-[100dvh] flex flex-col bg-background">
-      <div className="w-full max-w-[420px] mx-auto px-4 pt-10 pb-2 space-y-4">
+      <div className="w-full max-w-[420px] mx-auto px-4 pt-8 pb-28 space-y-3">
 
         {/* Header */}
         <div className="flex items-start justify-between gap-2">
